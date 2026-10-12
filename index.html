@@ -83,6 +83,11 @@
   .line.editable:active { background: var(--bg); }
   .line.skipped .desc, .line.skipped .when { text-decoration: line-through; color: var(--muted); }
   .edited { color: var(--accent); font-weight: 600; }
+  .datepick { margin: 4px 0 6px; }
+  .datepick input { flex: 1; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink); font-size: 16px; font-family: inherit; min-height: 46px; }
+  .datepick .btn { padding: 11px 14px; }
+  [data-select] { cursor: pointer; }
   .sheet-bg { position: fixed; inset: 0; z-index: 20; background: #0007; display: flex; align-items: flex-end; }
   .sheet { background: var(--bg); width: 100%; max-height: 88vh; overflow-y: auto; border-radius: 18px 18px 0 0;
     padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
@@ -179,7 +184,20 @@ const STATUS = {
   skipped: ['off', 'Saltado'],
   blocked: ['off', 'Ya tenía reservas'],
   already: ['done', 'Ya reservado en CPM'],
+  empty: ['off', 'Sin reuniones'],
 };
+
+// the day on screen: picked with the date field, otherwise the newest draft
+let selected = '';
+const requested = {}; // date -> asked the VM for it, waiting
+const todayIso = () => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; };
+function pick(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+  selected = date;
+  requested[date] = Date.now();
+  render();
+  send(`draft ${date}`, days[date] ? 'Actualizando ese día…' : 'Pidiendo el borrador a la VM… (menos de un minuto)');
+}
 
 function toast(msg, ms = 2600) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -214,6 +232,7 @@ function dayHtml(d, open) {
   const editable = d.status === 'pending';
 
   let html = `<h2>${dayLabel(d.date)} <span class="pill ${cls}">${label}</span></h2><div class="panel">`;
+  if (d.status === 'empty') return html + '<div class="summary"><span class="sub">No hay reuniones de trabajo en el calendario ese día.</span></div></div>';
   if (d.status === 'already') {
     html += `<div class="summary"><span class="big">${fmtH(total)}</span><span class="sub">ya en CPM, nada que aprobar</span></div>`;
     for (const e of d.entries) html += `<div class="result">${esc(e.project)} ${esc(e.ticket)} · ${fmtH(e.hours)}</div>`;
@@ -237,6 +256,9 @@ function dayHtml(d, open) {
   for (const r of d.results ?? []) html += `<div class="result${r.ok ? '' : ' bad'}">${r.ok ? '✓' : '✗'} ${esc(r.ticket)} ${fmtH(r.hours)}${r.ok ? '' : ': ' + esc(r.error)}</div>`;
   html += '</div>';
 
+  if (d.status === 'skipped' || d.status === 'blocked') {
+    html += `<div class="buttons"><button class="btn quiet wide" data-reopen="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'reopen' ? 'Reabriendo…' : '↩︎ Reabrir para revisar'}</button></div>`;
+  }
   if (editable) {
     html += `<div class="buttons">
       <button class="btn primary" data-approve="${d.date}" ${wait || !d.entries.length ? 'disabled' : ''}>${wait === 'approve' ? 'Reservando…' : wait === 'save' ? 'Guardando…' : 'Reservar'}</button>
@@ -253,14 +275,24 @@ function render() {
   if (!cfg.d || !cfg.r) return renderSetup(main);
 
   const sorted = Object.values(days).sort((a, b) => b.date.localeCompare(a.date));
-  let html = '';
-  if (!sorted.length) html += '<p class="empty">Todavía no hay borradores.<br><br>Llegan de lunes a viernes a las 17:30. Pulsa ↻ para pedir el último: la VM responde en menos de un minuto.</p>';
-  else {
-    html += dayHtml(sorted[0], true);
+  const current = selected || sorted[0]?.date || '';
+  for (const k in requested) if (days[k]?.at && new Date(days[k].at) > requested[k] - 5000 || Date.now() - requested[k] > 180000) delete requested[k];
+
+  let html = `<div class="row datepick"><input type="date" id="date" value="${current || todayIso()}" max="${todayIso()}">
+    <button class="btn quiet" id="go">Ver día</button></div>`;
+  if (!current) html += '<p class="empty">Todavía no hay borradores.<br><br>Llegan de lunes a viernes a las 17:30, o elige un día arriba.</p>';
+  else if (!days[current]) {
+    html += `<h2>${dayLabel(current)}</h2><p class="empty">${requested[current] ? 'La VM está armando el borrador… llega en menos de un minuto.' : 'No hay borrador para este día. Pulsa «Ver día».'}</p>`;
+  } else {
+    html += dayHtml(days[current], true);
+    if (requested[current]) html += '<p class="note">Actualizando desde la VM…</p>';
+  }
+  if (sorted.length) {
     html += `<div class="buttons"><button class="btn quiet wide" id="copilot" ${copilot ? '' : 'disabled'}>✏️ Editar en el Copilot</button></div>`;
-    if (sorted.length > 1) {
-      html += `<details class="older"${olderOpen ? ' open' : ''}><summary><h2>Días anteriores ▾</h2></summary>`;
-      for (const d of sorted.slice(1, 10)) html += dayHtml(d, false);
+    const others = sorted.filter((d) => d.date !== current).slice(0, 10);
+    if (others.length) {
+      html += `<details class="older"${olderOpen ? ' open' : ''}><summary><h2>Otros días ▾</h2></summary>`;
+      for (const d of others) html += `<div data-select="${d.date}">${dayHtml(d, false)}</div>`;
       html += '</details>';
     }
   }
@@ -363,10 +395,18 @@ function openEditor(date, i) {
 $('#main').addEventListener('click', (e) => {
   const line = e.target.closest('[data-line]');
   if (line) { const [date, i] = line.dataset.line.split('|'); return openEditor(date, Number(i)); }
-  const b = e.target.closest('button'); if (!b) return;
+  const b = e.target.closest('button');
+  if (b?.id === 'go') return pick($('#date').value);
+  const other = e.target.closest('[data-select]');
+  if (other && !b) { selected = other.dataset.select; window.scrollTo(0, 0); return render(); }
+  if (!b) return;
   if (b.id === 'copilot' && copilot) return window.open(copilot, '_blank');
-  const date = b.dataset.approve || b.dataset.skip; if (!date) return;
+  const date = b.dataset.approve || b.dataset.skip || b.dataset.reopen; if (!date) return;
   const d = days[date]; if (!d) return;
+  if (b.dataset.reopen) {
+    pending[date] = 'reopen'; render();
+    return send(`reopen ${date} ${d.token}`, 'Reabriendo… llega en menos de un minuto');
+  }
   if (b.dataset.approve) {
     if (!confirm(`¿Reservar ${fmtH(d.entries.reduce((s, x) => s + x.hours, 0))} en CPM para el ${dayLabel(date)}?`)) return;
     pending[date] = 'approve'; render();
@@ -376,6 +416,7 @@ $('#main').addEventListener('click', (e) => {
   send(`skip ${date} ${d.token}`, 'Saltado. Puedes reservarlo luego en el Copilot.');
 });
 
+$('#main').addEventListener('change', (e) => { if (e.target.id === 'date') pick(e.target.value); });
 $('#refresh').onclick = () => { if (cfg.r) send('refresh', 'Pidiendo datos a la VM…'); load(); };
 
 function accept(raw) {
@@ -390,7 +431,7 @@ function accept(raw) {
     if (prev && m.at <= prev.at) return;
     delete saving[m.date];
     days[m.date] = m;
-    if (m.status !== 'pending') delete pending[m.date];
+    if (m.status !== 'pending' || pending[m.date] === 'reopen') delete pending[m.date];
     const keep = Object.keys(days).sort().slice(-30);
     days = Object.fromEntries(keep.map((k) => [k, days[k]]));
     store.set('days', JSON.stringify(days));
