@@ -44,7 +44,7 @@
   .line { display: grid; grid-template-columns: 10px 1fr auto; gap: 2px 10px; padding: 11px 14px; border-top: 1px solid var(--line); align-items: baseline; }
   .line:first-child { border-top: 0; }
   .dot { width: 10px; height: 10px; border-radius: 50%; align-self: center; }
-  .dot.ok { background: var(--green); } .dot.unsure { background: var(--amber); } .dot.none { background: var(--red); }
+  .dot.ok { background: var(--green); } .dot.unsure { background: var(--amber); } .dot.none { background: var(--red); } .dot.off { background: var(--line); }
   .desc { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .when { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .target { grid-column: 2 / 4; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -79,6 +79,30 @@
   .setup input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
     color: var(--ink); font-size: 15px; margin: 10px 0; }
   .note { font-size: 13px; color: var(--muted); margin: 10px 4px; }
+  .line.editable { cursor: pointer; }
+  .line.editable:active { background: var(--bg); }
+  .line.skipped .desc, .line.skipped .when { text-decoration: line-through; color: var(--muted); }
+  .edited { color: var(--accent); font-weight: 600; }
+  .sheet-bg { position: fixed; inset: 0; z-index: 20; background: #0007; display: flex; align-items: flex-end; }
+  .sheet { background: var(--bg); width: 100%; max-height: 88vh; overflow-y: auto; border-radius: 18px 18px 0 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+  .sheet h3 { margin: 0 0 2px; font-size: 18px; }
+  .sheet .sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .sheet label { display: block; font-size: 13px; color: var(--muted); font-weight: 600; margin: 14px 2px 6px; }
+  .sheet input[type=search], .sheet input[type=text], .sheet input[type=number] { width: 100%; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); font-size: 16px; }
+  .tickets { background: var(--card); border: 1px solid var(--line); border-radius: 12px; max-height: 34vh; overflow-y: auto; margin-top: 8px; }
+  .ticket { display: block; width: 100%; text-align: left; border: 0; border-top: 1px solid var(--line); background: none;
+    color: var(--ink); padding: 10px 12px; font-size: 15px; }
+  .ticket:first-child { border-top: 0; }
+  .ticket small { display: block; color: var(--muted); font-size: 12px; }
+  .ticket[aria-pressed="true"] { background: var(--accent-soft); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1; }
+  .toggle { display: flex; align-items: center; justify-content: space-between; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px; margin-top: 8px; font-size: 15px; }
+  .toggle input { width: 20px; height: 20px; }
+  .sheet .buttons { margin-top: 16px; }
 </style>
 </head>
 <body>
@@ -123,7 +147,22 @@ document.addEventListener('toggle', (e) => { if (e.target.matches?.('details.old
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const mins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-const hours = (l) => Math.max(0, (mins(l.end) - mins(l.start)) / 60);
+const duration = (l) => Math.max(0, (mins(l.end) - mins(l.start)) / 60);
+const hours = (l) => (typeof l.hours === 'number' ? l.hours : duration(l));
+// same grouping as the VM (cpm-daily.mjs toEntries), so an edit shows its effect at once
+function toEntries(lines) {
+  const groups = new Map();
+  for (const l of lines) {
+    const h = hours(l);
+    if (l.skip || !l.ticket || h <= 0) continue;
+    const key = `${l.project}|${l.ticket}|${l.chargeable}`;
+    const g = groups.get(key) ?? { project: l.project, ticket: l.ticket, hours: 0 };
+    g.hours += h; groups.set(key, g);
+  }
+  return [...groups.values()].map((g) => ({ ...g, hours: Math.round(g.hours * 100) / 100 }));
+}
+let catalog = []; try { catalog = JSON.parse(store.get('catalog')) || []; } catch {}
+const saving = {}; // dates with an edit the VM hasn't confirmed yet; Reservar waits for it
 const fmtH = (h) => `${Math.round(h * 100) / 100} h`;
 const dayLabel = (key) => {
   const [y, m, d] = key.split('-').map(Number), date = new Date(y, m - 1, d);
@@ -168,9 +207,11 @@ function setStatus() {
 function dayHtml(d, open) {
   const [cls, label] = STATUS[d.status] ?? ['off', d.status];
   const total = d.entries.reduce((s, e) => s + e.hours, 0);
-  const missing = d.lines.filter((l) => !l.ticket).length;
-  const overlaps = d.lines.filter((l, i) => d.lines.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
-  const wait = pending[d.date];
+  const live = d.lines.filter((l) => !l.skip);
+  const missing = live.filter((l) => !l.ticket).length;
+  const overlaps = live.filter((l, i) => live.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
+  const wait = pending[d.date] || (saving[d.date] && 'save');
+  const editable = d.status === 'pending';
 
   let html = `<h2>${dayLabel(d.date)} <span class="pill ${cls}">${label}</span></h2><div class="panel">`;
   if (d.status === 'already') {
@@ -182,21 +223,26 @@ function dayHtml(d, open) {
   if (missing) html += `<div class="warn red">${missing} reunión${missing === 1 ? '' : 'es'} sin ticket: no se reserva${missing === 1 ? '' : 'n'}.</div>`;
   if (overlaps) html += `<div class="warn amber">${overlaps} reuniones se solapan: las horas se suman dos veces.</div>`;
   if (open) {
-    for (const l of d.lines) {
-      const kind = !l.ticket ? 'none' : l.tentative ? 'unsure' : 'ok';
-      html += `<div class="line"><span class="dot ${kind}"></span><span class="desc">${esc(l.description)}</span>
+    d.lines.forEach((l, i) => {
+      const kind = l.skip ? 'off' : !l.ticket ? 'none' : l.tentative ? 'unsure' : 'ok';
+      const target = l.skip ? 'No se reserva'
+        : l.ticket ? `${esc(l.project)} · ${esc(l.ticket)} · <span class="${typeof l.hours === 'number' ? 'edited' : ''}">${fmtH(hours(l))}</span>${l.chargeable === false ? ' · no facturable' : ''}`
+        : 'Sin ticket — toca para asignar';
+      html += `<div class="line${editable ? ' editable' : ''}${l.skip ? ' skipped' : ''}" ${editable ? `data-line="${d.date}|${i}"` : ''}>
+        <span class="dot ${kind}"></span><span class="desc">${esc(l.description)}</span>
         <span class="when">${l.start}–${l.end}</span>
-        <span class="target${l.ticket ? '' : ' none'}">${l.ticket ? `${esc(l.project)} · ${esc(l.ticket)} · ${fmtH(hours(l))}` : 'Sin ticket'}</span></div>`;
-    }
+        <span class="target${l.ticket || l.skip ? '' : ' none'}">${target}</span></div>`;
+    });
   }
   for (const r of d.results ?? []) html += `<div class="result${r.ok ? '' : ' bad'}">${r.ok ? '✓' : '✗'} ${esc(r.ticket)} ${fmtH(r.hours)}${r.ok ? '' : ': ' + esc(r.error)}</div>`;
   html += '</div>';
 
-  if (d.status === 'pending' && d.entries.length) {
+  if (editable) {
     html += `<div class="buttons">
-      <button class="btn primary" data-approve="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'approve' ? 'Reservando…' : 'Reservar'}</button>
+      <button class="btn primary" data-approve="${d.date}" ${wait || !d.entries.length ? 'disabled' : ''}>${wait === 'approve' ? 'Reservando…' : wait === 'save' ? 'Guardando…' : 'Reservar'}</button>
       <button class="btn quiet" data-skip="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'skip' ? 'Saltando…' : 'Saltar'}</button>
-    </div>`;
+    </div>
+    <p class="note">Toca una reunión para cambiar su ticket u horas.</p>`;
   }
   return html;
 }
@@ -234,7 +280,89 @@ function renderSetup(main) {
   };
 }
 
+/* ---------- editing a line ---------- */
+
+function openEditor(date, i) {
+  const d = days[date], l = d?.lines[i]; if (!l) return;
+  const draft = { project: l.project || '', ticket: l.ticket || '', chargeable: l.chargeable !== false,
+    hours: typeof l.hours === 'number' ? l.hours : null, skip: !!l.skip };
+  const bg = document.createElement('div');
+  bg.className = 'sheet-bg';
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="Editar reunión">
+    <h3>${esc(l.description)}</h3>
+    <div class="sub">${l.start}–${l.end} · ${fmtH(duration(l))} en el calendario</div>
+    <label for="q">Ticket</label>
+    <input type="search" id="q" placeholder="Buscar proyecto, ticket o asunto" autocomplete="off">
+    <div class="tickets" id="tickets"></div>
+    <label for="manual">…o escríbelo (número del ticket)</label>
+    <div class="row"><input type="text" id="manual" inputmode="numeric" placeholder="#12345"></div>
+    <label for="hrs">Horas a reservar</label>
+    <div class="row"><input type="number" id="hrs" min="0" max="24" step="0.25" inputmode="decimal"><button class="btn quiet" id="reset">Duración</button></div>
+    <div class="toggle"><span>Facturable</span><input type="checkbox" id="charge"></div>
+    <div class="toggle"><span>No reservar esta reunión</span><input type="checkbox" id="skipLine"></div>
+    <div class="buttons"><button class="btn quiet" id="cancel">Cancelar</button><button class="btn primary" id="ok">Guardar</button></div>
+  </div>`;
+  document.body.appendChild(bg);
+  const q = bg.querySelector('#q'), list = bg.querySelector('#tickets'), manual = bg.querySelector('#manual');
+  const hrs = bg.querySelector('#hrs'), charge = bg.querySelector('#charge'), skipLine = bg.querySelector('#skipLine');
+  hrs.value = draft.hours ?? Math.round(duration(l) * 100) / 100;
+  charge.checked = draft.chargeable; skipLine.checked = draft.skip;
+
+  const options = [...catalog];
+  if (draft.ticket && !options.some((r) => r[1] === draft.ticket)) options.unshift([draft.project, draft.ticket, '', draft.chargeable ? 1 : 0]);
+  function drawList() {
+    const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = options.filter((r) => words.every((w) => r.join(' ').toLowerCase().includes(w)));
+    list.innerHTML = rows.length ? rows.map((r) => `<button class="ticket" data-t="${esc(r[1])}" aria-pressed="${r[1] === draft.ticket}">
+      ${esc(r[1])} · ${esc(r[0])}<small>${esc(r[2] || ' ')}</small></button>`).join('')
+      : `<p class="note">${catalog.length ? 'Nada coincide. Escribe el número abajo.' : 'La lista de tickets llega con ↻.'}</p>`;
+  }
+  drawList();
+  q.addEventListener('input', drawList);
+  list.addEventListener('click', (e) => {
+    const t = e.target.closest('.ticket'); if (!t) return;
+    const r = options.find((x) => x[1] === t.dataset.t);
+    draft.ticket = r[1]; draft.project = r[0]; draft.chargeable = !!r[3]; charge.checked = draft.chargeable;
+    manual.value = ''; drawList();
+  });
+  manual.addEventListener('input', () => {
+    const n = manual.value.replace(/\D/g, '');
+    if (n) { draft.ticket = '#' + n; const known = catalog.find((r) => r[1] === draft.ticket); draft.project = known ? known[0] : ''; drawList(); }
+  });
+  bg.querySelector('#reset').onclick = () => { hrs.value = Math.round(duration(l) * 100) / 100; draft.hours = null; };
+  hrs.addEventListener('input', () => { draft.hours = hrs.value === '' ? null : Number(hrs.value); });
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
+  bg.querySelector('#cancel').onclick = close;
+  bg.querySelector('#ok').onclick = () => {
+    const change = { i };
+    if (draft.ticket !== (l.ticket || '') || draft.project !== (l.project || '')) { change.ticket = draft.ticket; change.project = draft.project; }
+    if (charge.checked !== (l.chargeable !== false)) change.chargeable = charge.checked;
+    const h = draft.hours === null || Math.abs(draft.hours - duration(l)) < 0.001 ? null : draft.hours;
+    if (h !== (typeof l.hours === 'number' ? l.hours : null)) change.hours = h;
+    if (skipLine.checked !== !!l.skip) change.skip = skipLine.checked;
+    close();
+    if (Object.keys(change).length === 1) return;
+    if (change.hours !== undefined && change.hours !== null && !(change.hours >= 0 && change.hours <= 24)) return toast('Horas entre 0 y 24.');
+
+    // show it at once; the VM's republished draft replaces this within a minute.
+    // Re-read the day: a snapshot may have replaced it while the sheet was open.
+    const day = days[date], cur = day?.lines[i]; if (!cur) return;
+    if (change.ticket !== undefined) Object.assign(cur, { ticket: change.ticket, project: change.project, tentative: false });
+    if (change.chargeable !== undefined) cur.chargeable = change.chargeable;
+    if (change.hours !== undefined) { if (change.hours === null) delete cur.hours; else cur.hours = change.hours; }
+    if (change.skip !== undefined) cur.skip = change.skip;
+    day.entries = toEntries(day.lines);
+    saving[date] = true;
+    store.set('days', JSON.stringify(days));
+    render();
+    send(`edit ${date} ${day.token} ${JSON.stringify([change])}`, 'Guardando en la VM…');
+  };
+}
+
 $('#main').addEventListener('click', (e) => {
+  const line = e.target.closest('[data-line]');
+  if (line) { const [date, i] = line.dataset.line.split('|'); return openEditor(date, Number(i)); }
   const b = e.target.closest('button'); if (!b) return;
   if (b.id === 'copilot' && copilot) return window.open(copilot, '_blank');
   const date = b.dataset.approve || b.dataset.skip; if (!date) return;
@@ -254,9 +382,13 @@ function accept(raw) {
   let m; try { m = JSON.parse(raw); } catch { return; }
   if (m.v !== 1) return;
   if (m.kind === 'url' && m.url) { copilot = m.url; store.set('copilot', copilot); }
+  if (m.kind === 'catalog' && Array.isArray(m.rows)) { catalog = m.rows; store.set('catalog', JSON.stringify(catalog)); }
   if (m.kind === 'day' && m.date) {
     const prev = days[m.date];
-    if (prev && prev.at > m.at) return;
+    // while an edit is unconfirmed, only a snapshot newer than the edited copy counts
+    // (replays of the old one would undo the edit on screen)
+    if (prev && m.at <= prev.at) return;
+    delete saving[m.date];
     days[m.date] = m;
     if (m.status !== 'pending') delete pending[m.date];
     const keep = Object.keys(days).sort().slice(-30);
