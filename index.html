@@ -112,6 +112,27 @@
   .tags .proj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mt.off .title, .mt.off .t { opacity: .5; } .mt.off .title { text-decoration: line-through; }
   .mt.static { cursor: default; } .mt.static:active { transform: none; }
+  .mt { cursor: pointer; }
+  .mt.has-rm { grid-template-columns: 50px 1fr auto 30px; }
+  .rm { grid-column: 4; grid-row: 1 / span 2; width: 30px; height: 30px; border: 0; border-radius: 50%;
+    background: var(--card-2); color: var(--muted); font-size: 13px; font-weight: 700; display: grid; place-items: center; }
+  .rm:active { background: var(--red-soft); color: var(--red); }
+  .rm.undo { color: var(--accent); background: var(--accent-soft); font-size: 16px; }
+
+  /* confirm pop-up */
+  .modal-bg { position: fixed; inset: 0; z-index: 40; background: #0b111c80; display: grid; place-items: center; padding: 24px; animation: fade .15s; }
+  .modal { background: var(--card); width: min(340px, 100%); border-radius: 20px; padding: 20px 18px 16px; text-align: center; animation: pop .18s ease-out;
+    box-shadow: 0 20px 50px #0004; }
+  @keyframes pop { from { transform: scale(.94); opacity: 0; } }
+  .modal .icon { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; margin: 0 auto 10px; font-size: 20px;
+    background: var(--accent-soft); color: var(--accent); }
+  .modal.danger .icon { background: var(--red-soft); color: var(--red); }
+  .modal h3 { margin: 0 0 6px; font-size: 18px; }
+  .modal p { margin: 0 0 16px; color: var(--muted); font-size: 14.5px; }
+  .modal p b { color: var(--ink); }
+  .modal .row { display: flex; gap: 10px; }
+  .modal .btn { flex: 1; }
+  .modal.danger .btn.primary { background: var(--red); box-shadow: 0 6px 16px #d23f3f40; }
 
   .rows { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
   .rows div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--line); font-size: 14px; }
@@ -372,13 +393,18 @@ function meetingHtml(d, l, i, editable) {
   const tags = l.skip ? '<span class="tag">No se reserva</span>'
     : l.ticket ? `<span class="tag">${esc(l.ticket)}</span><span class="proj">${esc(l.project)}${l.chargeable === false ? ' · no fact.' : ''}</span>`
     : '<span class="tag red">Sin ticket</span><span class="proj">toca para asignar</span>';
-  const attrs = editable ? `data-line="${d.date}|${i}"` : 'disabled';
-  return `<button class="mt ${kind}${editable ? '' : ' static'}" ${attrs}>
+  // a div, not a button: the card holds its own ✕ / ↺ button
+  const attrs = editable ? `data-line="${d.date}|${i}" role="button" tabindex="0"` : '';
+  const remove = !editable ? ''
+    : l.skip ? `<button class="rm undo" data-restore="${d.date}|${i}" aria-label="Volver a incluir">↺</button>`
+    : `<button class="rm" data-remove="${d.date}|${i}" aria-label="Quitar de la reserva">✕</button>`;
+  return `<div class="mt ${kind}${editable ? ' has-rm' : ' static'}" ${attrs}>
     <div class="t"><b>${l.start}</b><span>${l.end}</span></div>
     <div class="title">${esc(l.description)}</div>
     <div class="h${edited ? ' edited' : ''}">${l.skip ? '–' : num(hours(l))}<small>${edited ? 'editado' : 'h'}</small></div>
     <div class="tags">${tags}</div>
-  </button>`;
+    ${remove}
+  </div>`;
 }
 
 function render() {
@@ -586,29 +612,55 @@ function openEditor(date, i) {
     close();
     if (Object.keys(change).length === 1) return;
 
-    // show it at once; the VM's republished draft replaces this within seconds.
-    // Re-read the day: a snapshot may have replaced it while the sheet was open.
-    const day = days[date], cur = day?.lines[i]; if (!cur) return;
-    if (change.ticket !== undefined) Object.assign(cur, { ticket: change.ticket, project: change.project, tentative: false });
-    if (change.chargeable !== undefined) cur.chargeable = change.chargeable;
-    if (change.hours !== undefined) { if (change.hours === null) delete cur.hours; else cur.hours = change.hours; }
-    if (change.skip !== undefined) cur.skip = change.skip;
-    day.entries = toEntries(day.lines);
-    saving[date] = true;
-    store.set('days', JSON.stringify(days));
-    render();
-    send(`edit ${date} ${day.token} ${JSON.stringify([change])}`);
+    applyChange(date, change);
   };
+}
+
+// Shows a change at once and sends it to the VM, whose republished draft replaces
+// this within seconds. Re-reads the day: a snapshot may have replaced it meanwhile.
+function applyChange(date, change) {
+  const day = days[date], cur = day?.lines[change.i]; if (!cur) return;
+  if (change.ticket !== undefined) Object.assign(cur, { ticket: change.ticket, project: change.project, tentative: false });
+  if (change.chargeable !== undefined) cur.chargeable = change.chargeable;
+  if (change.hours !== undefined) { if (change.hours === null) delete cur.hours; else cur.hours = change.hours; }
+  if (change.skip !== undefined) cur.skip = change.skip;
+  day.entries = toEntries(day.lines);
+  saving[date] = true;
+  store.set('days', JSON.stringify(days));
+  render();
+  send(`edit ${date} ${day.token} ${JSON.stringify([change])}`);
+}
+
+// A styled yes/no pop-up; resolves true on the confirm button.
+function confirmDialog({ title, text, ok, icon = '?', danger = false }) {
+  return new Promise((resolve) => {
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal${danger ? ' danger' : ''}" role="alertdialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="icon">${icon}</div><h3>${esc(title)}</h3><p>${text}</p>
+      <div class="row"><button class="btn quiet" data-no>Cancelar</button><button class="btn primary" data-yes>${esc(ok)}</button></div></div>`;
+    const done = (v) => { bg.remove(); resolve(v); };
+    bg.addEventListener('click', (e) => {
+      if (e.target === bg || e.target.closest('[data-no]')) done(false);
+      else if (e.target.closest('[data-yes]')) done(true);
+    });
+    document.body.appendChild(bg);
+    bg.querySelector('[data-yes]').focus();
+  });
 }
 
 /* ---------- interaction ---------- */
 
-function act(b) {
+async function act(b) {
   const date = b.dataset.approve || b.dataset.skip || b.dataset.reopen;
   const d = days[date]; if (!d) return;
   if (b.dataset.reopen) { pending[date] = 'reopen'; render(); return send(`reopen ${date} ${d.token}`, 'Reabriendo…'); }
   if (b.dataset.approve) {
-    if (!confirm(`¿Reservar ${num(totalOf(d))} h en CPM para el ${dayLabel(date).toLowerCase()}?`)) return;
+    const yes = await confirmDialog({
+      title: '¿Reservar en CPM?', icon: '✓', ok: `Reservar ${num(totalOf(d))} h`,
+      text: `<b>${dayLabel(date)}</b><br>${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'}: ${d.entries.map((e) => `${esc(e.ticket)} ${num(e.hours)} h`).join(', ')}`,
+    });
+    if (!yes) return;
     pending[date] = 'approve'; render();
     return send(`approve ${date} ${d.token}`, 'Reservando en CPM…');
   }
@@ -616,7 +668,19 @@ function act(b) {
   send(`skip ${date} ${d.token}`, 'Saltado. Puedes reabrirlo cuando quieras.');
 }
 
-$('#main').addEventListener('click', (e) => {
+$('#main').addEventListener('click', async (e) => {
+  const rm = e.target.closest('[data-remove], [data-restore]');
+  if (rm) {
+    const [date, i] = (rm.dataset.remove || rm.dataset.restore).split('|');
+    const l = days[date]?.lines[Number(i)]; if (!l) return;
+    if (rm.dataset.restore) return applyChange(date, { i: Number(i), skip: false });
+    const yes = await confirmDialog({
+      title: '¿Quitar esta reunión?', icon: '✕', danger: true, ok: 'Quitar',
+      text: `<b>${esc(l.description)}</b><br>${l.start}–${l.end}${l.ticket ? ` · ${num(hours(l))} h` : ''}<br><br>No se reservará en CPM. La puedes volver a incluir con ↺.`,
+    });
+    if (yes) applyChange(date, { i: Number(i), skip: true });
+    return;
+  }
   const line = e.target.closest('[data-line]');
   if (line) { const [date, i] = line.dataset.line.split('|'); return openEditor(date, Number(i)); }
   const other = e.target.closest('[data-select]');
