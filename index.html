@@ -223,6 +223,27 @@
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
   .legend span { display: flex; align-items: center; gap: 5px; }
   .legend b { width: 4px; height: 14px; border-radius: 2px; }
+  /* tabs */
+  .tabs { display: flex; gap: 4px; margin: 2px 16px 6px; padding: 4px; background: var(--card-2); border-radius: 13px; border: 1px solid var(--line); }
+  .tabs button { flex: 1; border: 0; background: none; border-radius: 10px; padding: 8px 0; font-weight: 650; font-size: 14.5px; color: var(--muted); }
+  .tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
+
+  /* WF bookings */
+  .month { display: flex; align-items: center; justify-content: space-between; margin: 6px 0 12px; }
+  .month b { font-size: 18px; letter-spacing: -.01em; }
+  .month .round { width: 36px; height: 36px; font-size: 18px; }
+  .hero.wf { background: radial-gradient(120% 140% at 100% 0%, #9b7bf0 0%, #6a4fd6 50%, #4a33a8 100%); box-shadow: 0 10px 30px #6a4fd640; }
+  .vs { display: flex; gap: 10px; margin-top: 12px; }
+  .vs div { flex: 1; background: #ffffff1f; border-radius: 12px; padding: 10px 12px; }
+  .vs small { display: block; font-size: 12px; opacity: .85; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .vs b { font-size: 24px; font-variant-numeric: tabular-nums; }
+  .issue { background: var(--card); border-radius: 14px; box-shadow: var(--shadow); padding: 11px 13px; font-size: 14.5px; }
+  .issue .k { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; margin-bottom: 4px; }
+  .k.missing { background: var(--red-soft); color: var(--red); } .k.extra, .k.hours { background: var(--amber-soft); color: var(--amber); }
+  .k.date, .k.task { background: var(--accent-soft); color: var(--accent); } .k.comment { background: var(--card-2); color: var(--muted); }
+  .daytbl div { display: grid; grid-template-columns: 1fr 64px 64px 22px; gap: 6px; }
+  .daytbl b { text-align: right; font-weight: 600; } .daytbl .ok { color: var(--green); } .daytbl .no { color: var(--red); }
+  .daytbl .head { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .setup { background: var(--card); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
   .setup input { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font-size: 15px; margin: 10px 0; }
   .note { font-size: 13px; color: var(--muted); margin: 10px 4px; }
@@ -235,6 +256,7 @@
   <button class="round lang" id="lang" aria-label="Language">EN</button>
   <button class="round" id="refresh" aria-label="Refresh">↻</button>
 </header>
+<div class="tabs" id="tabs" role="tablist"><button data-tab="cpm" role="tab">CPM</button><button data-tab="wf" role="tab">WF bookings</button></div>
 <nav class="strip" id="strip" aria-label="Days"></nav>
 <main id="main"></main>
 <div class="bar" id="bar"></div>
@@ -457,7 +479,10 @@ function meetingHtml(d, l, i, editable) {
 function render() {
   setStatus();
   const main = $('#main');
+  $('#tabs').querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   if (!cfg.d || !cfg.r) { $('#strip').innerHTML = ''; renderBar(null); return renderSetup(main); }
+  $('#strip').hidden = tab === 'wf';
+  if (tab === 'wf') { renderBar(null); return renderWf(main); }
 
   const sorted = Object.values(days).sort((a, b) => b.date.localeCompare(a.date));
   const current = selected || sorted[0]?.date || '';
@@ -527,6 +552,90 @@ function render() {
 }
 let renderOthersOpen = false;
 document.addEventListener('toggle', (e) => { if (e.target.matches?.('details.others')) renderOthersOpen = e.target.open; }, true);
+
+/* ---------- WF bookings: the month's Red Bull hours, CPM against Workfront ---------- */
+
+// Workfront has no API key: Claude reads it through Chrome and drops a snapshot on the
+// VM; the Copilot server compares it with CPM (live). Results are kept per month.
+let tab = store.get('tab') === 'wf' ? 'wf' : 'cpm';
+let wfMonth = todayIso().slice(0, 7);
+let wfData = parse('wfData', {}); // month -> server answer + fetched
+const wfLoading = new Set();
+const shiftMonth = (m, by) => { const [y, mo] = m.split('-').map(Number); const d = new Date(y, mo - 1 + by, 1); return iso(d).slice(0, 7); };
+const monthLabel = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleString(lang === 'en' ? 'en' : 'es', { month: 'long', year: 'numeric' }); };
+const KIND = {
+  missing: ['Falta en Workfront', 'Not in Workfront'], extra: ['Solo en Workfront', 'Only in Workfront'],
+  hours: ['Horas distintas', 'Hours differ'], date: ['Otro día', 'Different day'],
+  task: ['Otra task', 'Different task'], comment: ['Comentario distinto', 'Comment differs'],
+};
+
+async function loadWf(month, force = false) {
+  if (!copilot || !searchKey || wfLoading.has(month)) return;
+  const known = wfData[month];
+  if (known && !force && Date.now() - known.fetched < 10 * 60e3) return;
+  wfLoading.add(month); if (tab === 'wf') render();
+  try {
+    const r = await fetch(`${copilot}/wf?month=${month}${force ? '&refresh=1' : ''}`, { headers: { 'x-copilot-key': searchKey }, signal: AbortSignal.timeout(90000) });
+    const body = await r.json();
+    wfData[month] = r.ok ? { ...body, fetched: Date.now() } : { error: body.error || r.status, fetched: Date.now() };
+    const keep = Object.keys(wfData).sort().slice(-6);
+    wfData = Object.fromEntries(keep.map((k) => [k, wfData[k]]));
+    store.set('wfData', JSON.stringify(wfData));
+  } catch {
+    wfData[month] = { ...(wfData[month] ?? {}), error: T('No pude hablar con la VM.', "Couldn't reach the VM."), fetched: Date.now() };
+  } finally { wfLoading.delete(month); if (tab === 'wf') render(); }
+}
+
+function renderWf(main) {
+  const m = wfMonth, w = wfData[m], busy = wfLoading.has(m);
+  let html = `<div class="month"><button class="round" data-wfm="-1" aria-label="${T('Mes anterior', 'Previous month')}">‹</button>
+    <b>${monthLabel(m)}</b>
+    <button class="round" data-wfm="1" aria-label="${T('Mes siguiente', 'Next month')}" ${m >= todayIso().slice(0, 7) ? 'disabled' : ''}>›</button></div>`;
+  if (!copilot || !searchKey) {
+    main.innerHTML = html + `<div class="empty"><b>${T('Falta conectar', 'Not connected yet')}</b>${T('Pulsa ↻ para recibir el enlace del Copilot.', 'Tap ↻ to get the Copilot link.')}</div>`;
+    return;
+  }
+  if (!w || (busy && !w.days)) {
+    main.innerHTML = html + `<div class="skeleton"></div><p class="note" style="text-align:center">${T('Leyendo CPM y Workfront…', 'Reading CPM and Workfront…')}</p>`;
+    if (!w) loadWf(m);
+    return;
+  }
+  if (w.error && !w.days) {
+    main.innerHTML = html + `<div class="empty"><b>${T('No se pudo cargar', "Couldn't load")}</b>${esc(w.error)}<br><br><button class="btn quiet" data-wfreload>${T('Reintentar', 'Try again')}</button></div>`;
+    return;
+  }
+  const diff = round2(w.totals.wf - w.totals.cpm);
+  const read = w.workfront?.fetchedAt ? new Date(w.workfront.fetchedAt).toLocaleString(lang === 'en' ? 'en' : 'es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  html += `<section class="hero wf"><div class="hero-top"><span>Red Bull</span>
+      <span class="hero-pill">${!w.workfront ? T('Sin Workfront', 'No Workfront') : diff === 0 && !w.issues?.length ? T('Todo cuadra', 'All matches') : `${w.issues.length} ${T('diferencias', 'differences')}`}</span></div>
+    <div class="vs"><div><small>CPM</small><b>${num(w.totals.cpm)}</b> h</div><div><small>Workfront</small><b>${w.workfront ? num(w.totals.wf) : '–'}</b>${w.workfront ? ' h' : ''}</div></div>
+    <div class="workday">${w.workfront ? `${T('Workfront leído el', 'Workfront read')} ${read}${diff ? ` · ${T('diferencia', 'difference')} ${diff > 0 ? '+' : ''}${num(diff)} h` : ''}` : T('Todavía no hay snapshot de Workfront para este mes.', 'No Workfront snapshot for this month yet.')}</div>
+  </section>`;
+  if (!w.workfront) {
+    html += `<div class="banner blue"><span>💬</span><span>${T('Para comparar, pídele a Claude:', 'To compare, ask Claude:')} <b>“Refresh the Workfront snapshot for ${m}”</b></span></div>`;
+  }
+  if (w.issues?.length) {
+    html += `<div class="section"><h2>${T('Qué cambiar en Workfront', 'What to change in Workfront')}</h2><span>${w.issues.length}</span></div><div class="list">`;
+    for (const i of w.issues) {
+      html += `<div class="issue"><span class="k ${i.kind}">${T(...(KIND[i.kind] ?? [i.kind, i.kind]))}</span><div>${esc(i.text)}</div></div>`;
+    }
+    html += '</div>';
+  }
+  if (w.days?.length) {
+    html += `<div class="section"><h2>${T('Por día', 'By day')}</h2></div><div class="rows daytbl">
+      <div class="head"><span>${T('Día', 'Day')}</span><b>CPM</b><b>WF</b><span></span></div>`;
+    for (const d of w.days) {
+      const same = !w.workfront || Math.abs(d.cpm - d.wf) < 0.01;
+      html += `<div><span>${dayLabel(d.date)}</span><b>${num(d.cpm)}</b><b>${w.workfront ? num(d.wf) : '–'}</b><span class="${same ? 'ok' : 'no'}">${w.workfront ? (same ? '✓' : '≠') : ''}</span></div>`;
+    }
+    html += '</div>';
+  } else {
+    html += `<div class="empty"><b>${T('Sin horas de Red Bull', 'No Red Bull hours')}</b>${T('No hay reservas de Red Bull en CPM este mes.', 'No Red Bull bookings in CPM this month.')}</div>`;
+  }
+  if (busy) html += `<p class="note" style="text-align:center">${T('Actualizando…', 'Updating…')}</p>`;
+  main.innerHTML = html;
+  loadWf(m);
+}
 
 function renderBar(d) {
   const bar = $('#bar');
@@ -748,8 +857,22 @@ $('#strip').addEventListener('change', (e) => { if (e.target.id === 'date') pick
 function setLangButton() { $('#lang').textContent = lang === 'en' ? 'ES' : 'EN'; document.documentElement.lang = lang; }
 $('#lang').onclick = () => { lang = lang === 'en' ? 'es' : 'en'; store.set('lang', lang); setLangButton(); renderStrip.done = false; render(); };
 setLangButton();
+$('#tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tab]'); if (!b) return;
+  tab = b.dataset.tab; store.set('tab', tab); window.scrollTo(0, 0); render();
+});
+$('#main').addEventListener('click', (e) => {
+  const m = e.target.closest('[data-wfm]');
+  if (m && !m.disabled) { wfMonth = shiftMonth(wfMonth, Number(m.dataset.wfm)); return render(); }
+  if (e.target.closest('[data-wfreload]')) loadWf(wfMonth, true);
+});
 $('#refresh').onclick = () => {
   if (!cfg.r) return;
+  if (tab === 'wf') {
+    const r = $('#refresh'); r.classList.add('spin'); setTimeout(() => r.classList.remove('spin'), 1500);
+    if (!copilot || !searchKey) send('refresh'); // the Copilot link + key come with it
+    return loadWf(wfMonth, true);
+  }
   const r = $('#refresh'); r.classList.add('spin'); setTimeout(() => r.classList.remove('spin'), 1500);
   send('refresh');
   if (selected) pick(selected, { force: true });
