@@ -45,6 +45,7 @@
   .status b { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
   .status.live b { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
   .round { border: 0; background: var(--card); width: 40px; height: 40px; border-radius: 50%; font-size: 18px; box-shadow: var(--shadow); flex: none; }
+  .round.lang { font-size: 13px; font-weight: 750; letter-spacing: .02em; }
   .round.spin { animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -231,9 +232,10 @@
 <header>
   <img class="logo" src="apple-touch-icon.png" alt="">
   <div class="brand"><h1>CPM</h1><div class="status" id="status"><b></b>—</div></div>
-  <button class="round" id="refresh" aria-label="Actualizar">↻</button>
+  <button class="round lang" id="lang" aria-label="Language">EN</button>
+  <button class="round" id="refresh" aria-label="Refresh">↻</button>
 </header>
-<nav class="strip" id="strip" aria-label="Días"></nav>
+<nav class="strip" id="strip" aria-label="Days"></nav>
 <main id="main"></main>
 <div class="bar" id="bar"></div>
 <div class="toast" id="toast" role="status"></div>
@@ -252,14 +254,18 @@
   the link's #fragment, which browsers never send to the server).
 */
 const NTFY = 'https://ntfy.sh';
-const DIAS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-const DIAS_LARGO = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const $ = (s) => document.querySelector(s);
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
+
+// Spanish or English: the ES/EN button, else the phone's language. T(es, en) picks one.
+let lang = store.get('lang') || ((navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en');
+const T = (es, en) => (lang === 'en' ? en : es);
+const DAYS_SHORT = { es: ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'], en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] };
+const DAYS_LONG = { es: ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'], en: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] };
 
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.get('d') && hash.get('r')) { store.set('d', hash.get('d')); store.set('r', hash.get('r')); history.replaceState(null, '', location.pathname); }
@@ -282,15 +288,16 @@ const mins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m
 const duration = (l) => Math.max(0, (mins(l.end) - mins(l.start)) / 60);
 const hours = (l) => (typeof l.hours === 'number' ? l.hours : duration(l));
 const round2 = (h) => Math.round(h * 100) / 100;
-const num = (h) => String(round2(h)).replace('.', ',');
+const num = (h) => T(String(round2(h)).replace('.', ','), String(round2(h)));
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const todayIso = () => iso(new Date());
 const toDate = (key) => { const [y, m, d] = key.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayLabel = (key) => {
   const date = toDate(key), today = new Date(); today.setHours(0, 0, 0, 0);
   const diff = Math.round((date - today) / 864e5);
-  const base = `${DIAS_LARGO[date.getDay()]} ${date.getDate()}.${date.getMonth() + 1}`;
-  return diff === 0 ? `Hoy · ${base}` : diff === -1 ? `Ayer · ${base}` : base;
+  const base = T(`${DAYS_LONG.es[date.getDay()]} ${date.getDate()}.${date.getMonth() + 1}`,
+    `${DAYS_LONG.en[date.getDay()]} ${date.getDate()} ${date.toLocaleString('en', { month: 'short' })}`);
+  return diff === 0 ? `${T('Hoy', 'Today')} · ${base}` : diff === -1 ? `${T('Ayer', 'Yesterday')} · ${base}` : base;
 };
 
 // same grouping as the VM (cpm-daily.mjs toEntries), so an edit shows its effect at once
@@ -307,15 +314,17 @@ function toEntries(lines) {
 }
 const totalOf = (d) => d.entries.reduce((s, e) => s + e.hours, 0);
 
-const STATUS = {
-  pending: ['pending', 'Por revisar'],
-  booked: ['done', 'Reservado'],
-  partial: ['bad', 'Reservado con errores'],
-  skipped: ['off', 'Saltado'],
-  blocked: ['off', 'Ya tenía reservas'],
-  already: ['done', 'Ya en CPM'],
-  empty: ['off', 'Sin reuniones'],
+const STATUS_ALL = {
+  pending: ['pending', 'Por revisar', 'To review'],
+  booked: ['done', 'Reservado', 'Booked'],
+  partial: ['bad', 'Reservado con errores', 'Booked with errors'],
+  skipped: ['off', 'Saltado', 'Skipped'],
+  blocked: ['off', 'Ya tenía reservas', 'Already had bookings'],
+  already: ['done', 'Ya en CPM', 'Already in CPM'],
+  empty: ['off', 'Sin reuniones', 'No meetings'],
 };
+// status -> [css class, label in the current language]
+const STATUS = new Proxy({}, { get: (_, k) => STATUS_ALL[k] && [STATUS_ALL[k][0], T(STATUS_ALL[k][1], STATUS_ALL[k][2])] });
 
 function toast(msg, ms = 2600) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -328,7 +337,7 @@ async function send(cmd, label) {
     if (!r.ok) throw new Error(r.status);
     if (label) toast(label);
   } catch {
-    toast('No se pudo enviar. ¿Tienes internet?');
+    toast(T('No se pudo enviar. ¿Tienes internet?', "Couldn't send. Are you online?"));
   }
 }
 
@@ -363,21 +372,22 @@ async function loadWorkday(date, force = false) {
 function workdayHtml(date, total, pendingDay) {
   const w = workdays[date];
   if (!w?.configured) return '';
-  if (!w.start) return `<div class="workday muted">🕘 Timesheet: sin hora de inicio todavía</div>`;
+  if (!w.start) return `<div class="workday muted">🕘 ${T('Timesheet: sin hora de inicio todavía', 'Timesheet: no start time yet')}</div>`;
   const span = `${w.start}–${w.end || '…'}`;
-  let html = `<div class="workday">🕘 ${span}${w.pause ? ` · pausa ${num(w.pause)} h` : ''}${w.real > 0 ? ` · <b>${num(w.real)} h</b> trabajadas` : ''}</div>`;
+  let html = `<div class="workday">🕘 ${span}${w.pause ? ` · ${T('pausa', 'break')} ${num(w.pause)} h` : ''}${w.real > 0 ? ` · <b>${num(w.real)} h</b> ${T('trabajadas', 'worked')}` : ''}</div>`;
   if (pendingDay && w.real > 0 && Math.abs(total - w.real) > 0.25) {
-    html += `<div class="workday warn">${total > w.real ? '⚠️ Vas a reservar más' : 'ℹ️ Vas a reservar menos'} de lo que trabajaste (${num(total)} h vs ${num(w.real)} h)</div>`;
+    html += `<div class="workday warn">${total > w.real ? T('⚠️ Vas a reservar más de lo que trabajaste', "⚠️ You're booking more than you worked") : T('ℹ️ Vas a reservar menos de lo que trabajaste', "ℹ️ You're booking less than you worked")} (${num(total)} h vs ${num(w.real)} h)</div>`;
   }
   return html;
 }
 
 function setStatus() {
   const el = $('#status');
-  if (!lastAt) { el.className = 'status'; el.innerHTML = '<b></b>esperando datos…'; return; }
+  if (!lastAt) { el.className = 'status'; el.innerHTML = `<b></b>${T('esperando datos…', 'waiting for data…')}`; return; }
   const age = (Date.now() - new Date(lastAt)) / 6e4;
   el.className = 'status' + (age < 20 ? ' live' : '');
-  el.innerHTML = `<b></b>${age < 1 ? 'al día' : age < 60 ? `hace ${Math.round(age)} min` : age < 1440 ? `hace ${Math.round(age / 60)} h` : `hace ${Math.round(age / 1440)} d`}`;
+  const ago = (n, u) => T(`hace ${n} ${u}`, `${n} ${u} ago`);
+  el.innerHTML = `<b></b>${age < 1 ? T('al día', 'up to date') : age < 60 ? ago(Math.round(age), 'min') : age < 1440 ? ago(Math.round(age / 60), 'h') : ago(Math.round(age / 1440), 'd')}`;
 }
 
 /* ---------- rendering ---------- */
@@ -392,8 +402,8 @@ function renderStrip(current) {
   const strip = $('#strip');
   strip.innerHTML = out.map((k) => {
     const d = toDate(k), st = days[k] ? (STATUS[days[k].status] ?? ['off'])[0] : '';
-    return `<button class="day" data-day="${k}" aria-pressed="${k === current}"><small>${k === todayIso() ? 'Hoy' : DIAS[d.getDay()]}</small><span>${d.getDate()}</span><i class="${st}"></i></button>`;
-  }).join('') + `<label class="day cal" aria-label="Otra fecha">📅<input type="date" id="date" max="${todayIso()}" value="${current || todayIso()}"></label>`;
+    return `<button class="day" data-day="${k}" aria-pressed="${k === current}"><small>${k === todayIso() ? T('Hoy', 'Today') : DAYS_SHORT[lang][d.getDay()]}</small><span>${d.getDate()}</span><i class="${st}"></i></button>`;
+  }).join('') + `<label class="day cal" aria-label="${T('Otra fecha', 'Other date')}">📅<input type="date" id="date" max="${todayIso()}" value="${current || todayIso()}"></label>`;
   const on = strip.querySelector('[aria-pressed="true"]');
   if (on && !renderStrip.done) { on.scrollIntoView({ inline: 'end', block: 'nearest' }); renderStrip.done = true; }
 }
@@ -405,9 +415,10 @@ function heroHtml(d) {
   const unsure = live.filter((l) => l.ticket && l.tentative).length;
   const missing = live.filter((l) => !l.ticket).length;
   const total = totalOf(d);
-  const sub = d.status === 'already' ? 'ya cargadas en CPM'
-    : d.status === 'empty' ? 'sin reuniones de trabajo en el calendario'
-    : `${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'} · ${d.lines.length} reunion${d.lines.length === 1 ? '' : 'es'}`;
+  const ne = d.entries.length, nl = d.lines.length;
+  const sub = d.status === 'already' ? T('ya cargadas en CPM', 'already in CPM')
+    : d.status === 'empty' ? T('sin reuniones de trabajo en el calendario', 'no work meetings in the calendar')
+    : T(`${ne} entrada${ne === 1 ? '' : 's'} · ${nl} reunion${nl === 1 ? '' : 'es'}`, `${ne} entr${ne === 1 ? 'y' : 'ies'} · ${nl} meeting${nl === 1 ? '' : 's'}`);
   let html = `<section class="hero ${cls === 'pending' ? '' : cls}">
     <div class="hero-top"><span>${dayLabel(d.date)}</span><span class="hero-pill">${label}</span></div>
     <div class="hero-total">${num(total)}<small>h</small></div>
@@ -415,9 +426,9 @@ function heroHtml(d) {
     ${workdayHtml(d.date, total, d.status === 'pending')}`;
   if (d.lines.length) {
     html += '<div class="stats">';
-    if (sure) html += `<span class="stat"><b style="background:#5ee0a0"></b>${sure} segura${sure === 1 ? '' : 's'}</span>`;
-    if (unsure) html += `<span class="stat"><b style="background:#ffd27a"></b>${unsure} por revisar</span>`;
-    if (missing) html += `<span class="stat"><b style="background:#ff9a9a"></b>${missing} sin ticket</span>`;
+    if (sure) html += `<span class="stat"><b style="background:#5ee0a0"></b>${T(`${sure} segura${sure === 1 ? '' : 's'}`, `${sure} sure`)}</span>`;
+    if (unsure) html += `<span class="stat"><b style="background:#ffd27a"></b>${unsure} ${T('por revisar', 'to check')}</span>`;
+    if (missing) html += `<span class="stat"><b style="background:#ff9a9a"></b>${missing} ${T('sin ticket', 'no ticket')}</span>`;
     html += '</div>';
   }
   return html + '</section>';
@@ -426,18 +437,18 @@ function heroHtml(d) {
 function meetingHtml(d, l, i, editable) {
   const kind = l.skip ? 'off' : !l.ticket ? 'none' : l.tentative ? 'unsure' : 'ok';
   const edited = typeof l.hours === 'number';
-  const tags = l.skip ? '<span class="tag">No se reserva</span>'
-    : l.ticket ? `<span class="tag">${esc(l.ticket)}</span><span class="proj">${esc(l.project)}${l.chargeable === false ? ' · no fact.' : ''}</span>`
-    : '<span class="tag red">Sin ticket</span><span class="proj">toca para asignar</span>';
+  const tags = l.skip ? `<span class="tag">${T('No se reserva', 'Not booked')}</span>`
+    : l.ticket ? `<span class="tag">${esc(l.ticket)}</span><span class="proj">${esc(l.project)}${l.chargeable === false ? T(' · no fact.', ' · non-bill.') : ''}</span>`
+    : `<span class="tag red">${T('Sin ticket', 'No ticket')}</span><span class="proj">${T('toca para asignar', 'tap to assign')}</span>`;
   // a div, not a button: the card holds its own ✕ / ↺ button
   const attrs = editable ? `data-line="${d.date}|${i}" role="button" tabindex="0"` : '';
   const remove = !editable ? ''
-    : l.skip ? `<button class="rm undo" data-restore="${d.date}|${i}" aria-label="Volver a incluir">↺</button>`
-    : `<button class="rm" data-remove="${d.date}|${i}" aria-label="Quitar de la reserva">✕</button>`;
+    : l.skip ? `<button class="rm undo" data-restore="${d.date}|${i}" aria-label="${T('Volver a incluir', 'Include again')}">↺</button>`
+    : `<button class="rm" data-remove="${d.date}|${i}" aria-label="${T('Quitar de la reserva', 'Remove from booking')}">✕</button>`;
   return `<div class="mt ${kind}${editable ? ' has-rm' : ' static'}" ${attrs}>
     <div class="t"><b>${l.start}</b><span>${l.end}</span></div>
     <div class="title">${esc(l.description)}</div>
-    <div class="h${edited ? ' edited' : ''}">${l.skip ? '–' : num(hours(l))}<small>${edited ? 'editado' : 'h'}</small></div>
+    <div class="h${edited ? ' edited' : ''}">${l.skip ? '–' : num(hours(l))}<small>${edited ? T('editado', 'edited') : 'h'}</small></div>
     <div class="tags">${tags}</div>
     ${remove}
   </div>`;
@@ -455,52 +466,55 @@ function render() {
 
   let html = '';
   if (store.get('guideSeen') !== '1') {
-    html += `<section class="guide"><div class="guide-head"><b>Cómo funciona</b><button class="x" id="guideOk" aria-label="Cerrar">✕</button></div>
-      <ol>
+    html += `<section class="guide"><div class="guide-head"><b>${T('Cómo funciona', 'How it works')}</b><button class="x" id="guideOk" aria-label="${T('Cerrar', 'Close')}">✕</button></div>
+      <ol>${T(`
         <li>De lunes a viernes a las <b>17:30</b> llega el borrador del día, armado con tu calendario.</li>
         <li><b>Toca una reunión</b> para cambiar el ticket, las horas o excluirla.</li>
-        <li>Pulsa <b>Reservar</b> y se carga en CPM. ¿Hoy no? <b>Saltar</b> (lo puedes reabrir).</li>
+        <li>Pulsa <b>Reservar</b> y se carga en CPM. ¿Hoy no? <b>Saltar</b> (lo puedes reabrir).</li>`, `
+        <li>Monday to Friday at <b>17:30</b> the day's draft arrives, built from your calendar.</li>
+        <li><b>Tap a meeting</b> to change its ticket or hours, or leave it out.</li>
+        <li>Tap <b>Book</b> and it goes into CPM. Not today? <b>Skip</b> (you can reopen it).</li>`)}
       </ol>
-      <div class="legend"><span><b style="background:var(--green)"></b>seguro</span><span><b style="background:var(--amber)"></b>revisa el ticket</span><span><b style="background:var(--red)"></b>falta ticket</span></div>
-      <p>Otro día: tócalo arriba o usa 📅.</p></section>`;
+      <div class="legend"><span><b style="background:var(--green)"></b>${T('seguro', 'sure')}</span><span><b style="background:var(--amber)"></b>${T('revisa el ticket', 'check the ticket')}</span><span><b style="background:var(--red)"></b>${T('falta ticket', 'no ticket')}</span></div>
+      <p>${T('Otro día: tócalo arriba o usa 📅.', 'Another day: tap it above or use 📅.')}</p></section>`;
   }
   const d = days[current];
   if (!current) {
-    html += '<div class="empty"><b>Todavía no hay borradores</b>Llegan de lunes a viernes a las 17:30, o elige un día arriba.</div>';
+    html += `<div class="empty"><b>${T('Todavía no hay borradores', 'No drafts yet')}</b>${T('Llegan de lunes a viernes a las 17:30, o elige un día arriba.', 'They arrive Monday to Friday at 17:30, or pick a day above.')}</div>`;
   } else if (!d) {
     html += requested[current]
-      ? `<div class="skeleton"></div><p class="note" style="text-align:center">Armando el borrador del ${dayLabel(current).toLowerCase()}… unos segundos.</p>`
-      : `<div class="empty"><b>${dayLabel(current)}</b>Sin borrador todavía.<br><br><button class="btn quiet" data-ask="${current}">Pedir a la VM</button></div>`;
+      ? `<div class="skeleton"></div><p class="note" style="text-align:center">${T(`Armando el borrador del ${dayLabel(current).toLowerCase()}… unos segundos.`, `Building the draft for ${dayLabel(current)}… a few seconds.`)}</p>`
+      : `<div class="empty"><b>${dayLabel(current)}</b>${T('Sin borrador todavía.', 'No draft yet.')}<br><br><button class="btn quiet" data-ask="${current}">${T('Pedir a la VM', 'Ask the VM')}</button></div>`;
   } else {
     const editable = d.status === 'pending';
     html += heroHtml(d);
     const live = d.lines.filter((l) => !l.skip);
     const overlaps = live.filter((l, i) => live.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
-    if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${overlaps} reuniones se solapan y sus horas se suman. Toca una para bajarle las horas o excluirla.</span></div>`;
-    if (saving[d.date]) html += '<div class="banner blue"><span>⏳</span><span>Guardando tus cambios en la VM…</span></div>';
+    if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${T(`${overlaps} reuniones se solapan y sus horas se suman. Toca una para bajarle las horas o excluirla.`, `${overlaps} meetings overlap and their hours add up. Tap one to lower its hours or leave it out.`)}</span></div>`;
+    if (saving[d.date]) html += `<div class="banner blue"><span>⏳</span><span>${T('Guardando tus cambios en la VM…', 'Saving your changes on the VM…')}</span></div>`;
 
     if (d.lines.length) {
-      html += `<div class="section"><h2>Reuniones</h2><span>${editable ? 'toca para editar' : ''}</span></div><div class="list">`;
+      html += `<div class="section"><h2>${T('Reuniones', 'Meetings')}</h2><span>${editable ? T('toca para editar', 'tap to edit') : ''}</span></div><div class="list">`;
       d.lines.forEach((l, i) => { html += meetingHtml(d, l, i, editable); });
       html += '</div>';
     }
     if (d.status === 'already' && d.entries.length) {
-      html += '<div class="section"><h2>En CPM</h2></div><div class="rows">';
+      html += `<div class="section"><h2>${T('En CPM', 'In CPM')}</h2></div><div class="rows">`;
       for (const e of d.entries) html += `<div><span>${esc(e.ticket)} · ${esc(e.project)}</span><b>${num(e.hours)} h</b></div>`;
       html += '</div>';
     }
     if (d.results?.length) {
-      html += '<div class="section"><h2>Resultado</h2></div><div class="rows">';
+      html += `<div class="section"><h2>${T('Resultado', 'Result')}</h2></div><div class="rows">`;
       for (const r of d.results) html += `<div class="${r.ok ? '' : 'bad'}"><span>${r.ok ? '✓' : '✗'} ${esc(r.ticket)}${r.ok ? '' : ' · ' + esc(r.error)}</span><b>${num(r.hours)} h</b></div>`;
       html += '</div>';
     }
   }
 
-  html += `<button class="link" id="copilot" ${copilot ? '' : 'disabled'}><span>✏️&nbsp; Abrir el Copilot<br><small>${copilot ? 'para cambios más grandes' : 'el enlace llega con ↻'}</small></span>›</button>`;
+  html += `<button class="link" id="copilot" ${copilot ? '' : 'disabled'}><span>✏️&nbsp; ${T('Abrir el Copilot', 'Open the Copilot')}<br><small>${copilot ? T('para cambios más grandes', 'for bigger changes') : T('el enlace llega con ↻', 'the link arrives with ↻')}</small></span>›</button>`;
 
   const others = sorted.filter((x) => x.date !== current).slice(0, 10);
   if (others.length) {
-    html += `<details class="others"${renderOthersOpen ? ' open' : ''}><summary class="section"><h2>Otros días ▾</h2><span>${others.length}</span></summary><div class="rows">`;
+    html += `<details class="others"${renderOthersOpen ? ' open' : ''}><summary class="section"><h2>${T('Otros días', 'Other days')} ▾</h2><span>${others.length}</span></summary><div class="rows">`;
     for (const x of others) {
       const [, label] = STATUS[x.status] ?? ['off', x.status];
       html += `<div data-select="${x.date}"><span>${dayLabel(x.date)} · <span style="color:var(--muted)">${label}</span></span><b>${num(totalOf(x))} h</b></div>`;
@@ -519,23 +533,23 @@ function renderBar(d) {
   if (!d || !['pending', 'skipped', 'blocked'].includes(d.status)) { bar.classList.remove('show'); return; }
   const wait = pending[d.date] || (saving[d.date] && 'save');
   if (d.status === 'pending') {
-    bar.innerHTML = `<button class="btn quiet" data-skip="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'skip' ? 'Saltando…' : 'Saltar'}</button>
-      <button class="btn primary" data-approve="${d.date}" ${wait || !d.entries.length ? 'disabled' : ''}>${wait === 'approve' ? 'Reservando…' : wait === 'save' ? 'Guardando…' : `Reservar ${num(totalOf(d))} h`}</button>`;
+    bar.innerHTML = `<button class="btn quiet" data-skip="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'skip' ? T('Saltando…', 'Skipping…') : T('Saltar', 'Skip')}</button>
+      <button class="btn primary" data-approve="${d.date}" ${wait || !d.entries.length ? 'disabled' : ''}>${wait === 'approve' ? T('Reservando…', 'Booking…') : wait === 'save' ? T('Guardando…', 'Saving…') : `${T('Reservar', 'Book')} ${num(totalOf(d))} h`}</button>`;
   } else {
-    bar.innerHTML = `<button class="btn primary" data-reopen="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'reopen' ? 'Reabriendo…' : '↩︎ Reabrir para revisar'}</button>`;
+    bar.innerHTML = `<button class="btn primary" data-reopen="${d.date}" ${wait ? 'disabled' : ''}>${wait === 'reopen' ? T('Reabriendo…', 'Reopening…') : T('↩︎ Reabrir para revisar', '↩︎ Reopen to review')}</button>`;
   }
   bar.classList.add('show');
 }
 
 function renderSetup(main) {
-  main.innerHTML = `<div class="setup"><b>Falta conectar la app</b>
-    <p class="note">Abre esta página con el enlace que te dio Claude (el que termina en <code>#d=…&amp;r=…</code>), o pégalo aquí:</p>
+  main.innerHTML = `<div class="setup"><b>${T('Falta conectar la app', 'The app is not connected yet')}</b>
+    <p class="note">${T('Abre esta página con el enlace que te dio Claude (el que termina en <code>#d=…&amp;r=…</code>), o pégalo aquí:', 'Open this page with the link Claude gave you (the one ending in <code>#d=…&amp;r=…</code>), or paste it here:')}</p>
     <input id="link" placeholder="https://…#d=…&r=…" autocomplete="off">
-    <button class="btn primary" id="save">Conectar</button></div>`;
+    <button class="btn primary" id="save">${T('Conectar', 'Connect')}</button></div>`;
   $('#save').onclick = () => {
     const h = new URLSearchParams(($('#link').value.split('#')[1] || ''));
     if (h.get('d') && h.get('r')) { store.set('d', h.get('d')); store.set('r', h.get('r')); location.reload(); }
-    else toast('Ese enlace no tiene los datos de conexión.');
+    else toast(T('Ese enlace no tiene los datos de conexión.', "That link doesn't contain the connection details."));
   };
 }
 
@@ -547,25 +561,25 @@ function openEditor(date, i) {
     hours: typeof l.hours === 'number' ? l.hours : null };
   const bg = document.createElement('div');
   bg.className = 'sheet-bg';
-  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="Editar reunión">
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="${T('Editar reunión', 'Edit meeting')}">
     <div class="grab"></div>
     <div class="sheet-body">
       <h3>${esc(l.description)}</h3>
-      <div class="sub">${l.start}–${l.end} · ${num(duration(l))} h en el calendario</div>
+      <div class="sub">${l.start}–${l.end} · ${num(duration(l))} h ${T('en el calendario', 'in the calendar')}</div>
       <label for="q">Ticket</label>
-      <div class="search"><input type="search" id="q" placeholder="Número, proyecto o asunto" autocomplete="off" enterkeyhint="search"></div>
+      <div class="search"><input type="search" id="q" placeholder="${T('Número, proyecto o asunto', 'Number, project or subject')}" autocomplete="off" enterkeyhint="search"></div>
       <div class="tickets" id="tickets"></div>
-      <label for="hrs">Horas a reservar</label>
-      <div class="hrs"><button class="step" data-step="-0.25" aria-label="Menos">−</button>
+      <label for="hrs">${T('Horas a reservar', 'Hours to book')}</label>
+      <div class="hrs"><button class="step" data-step="-0.25" aria-label="${T('Menos', 'Less')}">−</button>
         <input type="number" id="hrs" min="0" max="24" step="0.25" inputmode="decimal">
-        <button class="step" data-step="0.25" aria-label="Más">+</button>
-        <button class="btn quiet" id="reset">Duración</button></div>
+        <button class="step" data-step="0.25" aria-label="${T('Más', 'More')}">+</button>
+        <button class="btn quiet" id="reset">${T('Duración', 'Duration')}</button></div>
       <div class="switches">
-        <label class="switch">Facturable<input type="checkbox" id="charge"></label>
-        <label class="switch">No reservar esta reunión<input type="checkbox" id="skipLine"></label>
+        <label class="switch">${T('Facturable', 'Billable')}<input type="checkbox" id="charge"></label>
+        <label class="switch">${T('No reservar esta reunión', "Don't book this meeting")}<input type="checkbox" id="skipLine"></label>
       </div>
     </div>
-    <div class="sheet-foot"><button class="btn quiet" id="cancel">Cancelar</button><button class="btn primary" id="ok">Guardar</button></div>
+    <div class="sheet-foot"><button class="btn quiet" id="cancel">${T('Cancelar', 'Cancel')}</button><button class="btn primary" id="ok">${T('Guardar', 'Save')}</button></div>
   </div>`;
   document.body.appendChild(bg);
   const q = bg.querySelector('#q'), list = bg.querySelector('#tickets');
@@ -577,6 +591,7 @@ function openEditor(date, i) {
   // the meeting's current ticket first, then your recent ones
   const current = catalog.find((r) => r[1] === draft.ticket) ?? (draft.ticket ? [draft.project, draft.ticket, '', draft.chargeable ? 1 : 0] : null);
   const options = current ? [current, ...catalog.filter((r) => r !== current)] : [...catalog];
+  const SEARCHING = T('Buscando en CPM…', 'Searching CPM…');
   let remote = [], remoteState = '', searchCtl, timer;
   const row = (r) => `<button class="ticket" data-t="${esc(r[1])}" aria-pressed="${r[1] === draft.ticket}">
       <b>${esc(r[1])}</b> · ${esc(r[0])}<small>${esc(r[2] || ' ')}</small></button>`;
@@ -587,13 +602,13 @@ function openEditor(date, i) {
     const more = remote.filter((r) => !shown.has(r[1]));
     const digits = text.replace(/^#/, '');
     let html = '';
-    if (local.length) html += (text ? '<div class="group">Tus tickets</div>' : '<div class="group">Recientes</div>') + local.map(row).join('');
-    if (more.length) html += '<div class="group">En CPM</div>' + more.map(row).join('');
-    if (/^\d{3,7}$/.test(digits) && !shown.has('#' + digits) && !more.some((r) => r[1] === '#' + digits) && remoteState !== 'Buscando en CPM…') {
-      html += `<button class="ticket" data-t="#${digits}"><b>Usar #${digits}</b><small>No está en la lista, pero puedes usarlo igual</small></button>`;
+    if (local.length) html += `<div class="group">${text ? T('Tus tickets', 'Your tickets') : T('Recientes', 'Recent')}</div>` + local.map(row).join('');
+    if (more.length) html += `<div class="group">${T('En CPM', 'In CPM')}</div>` + more.map(row).join('');
+    if (/^\d{3,7}$/.test(digits) && !shown.has('#' + digits) && !more.some((r) => r[1] === '#' + digits) && remoteState !== SEARCHING) {
+      html += `<button class="ticket" data-t="#${digits}"><b>${T('Usar', 'Use')} #${digits}</b><small>${T('No está en la lista, pero puedes usarlo igual', "Not in the list, but you can still use it")}</small></button>`;
     }
     if (remoteState) html += `<p class="hint">${remoteState}</p>`;
-    if (!html) html = `<p class="hint">${catalog.length ? 'Escribe un número de ticket o una palabra del asunto.' : 'Tus tickets llegan con ↻.'}</p>`;
+    if (!html) html = `<p class="hint">${catalog.length ? T('Escribe un número de ticket o una palabra del asunto.', 'Type a ticket number or a word from the subject.') : T('Tus tickets llegan con ↻.', 'Your tickets arrive with ↻.')}</p>`;
     list.innerHTML = html;
   }
   // tickets beyond your recent ones: asked to the Copilot server on the VM, which holds the CPM key
@@ -602,19 +617,19 @@ function openEditor(date, i) {
     searchCtl?.abort();
     remote = [];
     if (!(/^\d{3,7}$/.test(digits) || text.length >= 3)) { remoteState = ''; return drawList(); }
-    if (!copilot || !searchKey) { remoteState = 'La búsqueda en CPM se activa con ↻.'; return drawList(); }
+    if (!copilot || !searchKey) { remoteState = T('La búsqueda en CPM se activa con ↻.', 'CPM search turns on with ↻.'); return drawList(); }
     const ctl = searchCtl = new AbortController();
     const timeout = setTimeout(() => ctl.abort(), 15000);
-    remoteState = 'Buscando en CPM…'; drawList();
+    remoteState = SEARCHING; drawList();
     try {
       const r = await fetch(`${copilot}/issues?q=${encodeURIComponent(text)}`, { headers: { 'x-copilot-key': searchKey }, signal: ctl.signal });
       const body = await r.json();
       if (!r.ok) throw new Error(body.error || r.status);
       remote = body.issues.map((i) => [i.project, '#' + i.id, i.subject, null]);
-      remoteState = remote.length ? '' : 'Nada más en CPM.';
+      remoteState = remote.length ? '' : T('Nada más en CPM.', 'Nothing else in CPM.');
     } catch {
       if (ctl !== searchCtl) return; // a newer search replaced this one
-      remoteState = 'No pude buscar en CPM (¿la VM está encendida?).';
+      remoteState = T('No pude buscar en CPM (¿la VM está encendida?).', "Couldn't search CPM (is the VM on?).");
     } finally { clearTimeout(timeout); }
     if (ctl === searchCtl) drawList();
   }
@@ -645,7 +660,7 @@ function openEditor(date, i) {
     const h = draft.hours === null || Math.abs(draft.hours - duration(l)) < 0.001 ? null : draft.hours;
     if (h !== (typeof l.hours === 'number' ? l.hours : null)) change.hours = h;
     if (skipLine.checked !== !!l.skip) change.skip = skipLine.checked;
-    if (change.hours != null && !(change.hours >= 0 && change.hours <= 24)) return toast('Horas entre 0 y 24.');
+    if (change.hours != null && !(change.hours >= 0 && change.hours <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
     close();
     if (Object.keys(change).length === 1) return;
 
@@ -675,7 +690,7 @@ function confirmDialog({ title, text, ok, icon = '?', danger = false }) {
     bg.className = 'modal-bg';
     bg.innerHTML = `<div class="modal${danger ? ' danger' : ''}" role="alertdialog" aria-modal="true" aria-label="${esc(title)}">
       <div class="icon">${icon}</div><h3>${esc(title)}</h3><p>${text}</p>
-      <div class="row"><button class="btn quiet" data-no>Cancelar</button><button class="btn primary" data-yes>${esc(ok)}</button></div></div>`;
+      <div class="row"><button class="btn quiet" data-no>${T('Cancelar', 'Cancel')}</button><button class="btn primary" data-yes>${esc(ok)}</button></div></div>`;
     const done = (v) => { bg.remove(); resolve(v); };
     bg.addEventListener('click', (e) => {
       if (e.target === bg || e.target.closest('[data-no]')) done(false);
@@ -691,18 +706,18 @@ function confirmDialog({ title, text, ok, icon = '?', danger = false }) {
 async function act(b) {
   const date = b.dataset.approve || b.dataset.skip || b.dataset.reopen;
   const d = days[date]; if (!d) return;
-  if (b.dataset.reopen) { pending[date] = 'reopen'; render(); return send(`reopen ${date} ${d.token}`, 'Reabriendo…'); }
+  if (b.dataset.reopen) { pending[date] = 'reopen'; render(); return send(`reopen ${date} ${d.token}`, T('Reabriendo…', 'Reopening…')); }
   if (b.dataset.approve) {
     const yes = await confirmDialog({
-      title: '¿Reservar en CPM?', icon: '✓', ok: `Reservar ${num(totalOf(d))} h`,
-      text: `<b>${dayLabel(date)}</b><br>${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'}: ${d.entries.map((e) => `${esc(e.ticket)} ${num(e.hours)} h`).join(', ')}`,
+      title: T('¿Reservar en CPM?', 'Book in CPM?'), icon: '✓', ok: `${T('Reservar', 'Book')} ${num(totalOf(d))} h`,
+      text: `<b>${dayLabel(date)}</b><br>${T(`${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'}`, `${d.entries.length} entr${d.entries.length === 1 ? 'y' : 'ies'}`)}: ${d.entries.map((e) => `${esc(e.ticket)} ${num(e.hours)} h`).join(', ')}`,
     });
     if (!yes) return;
     pending[date] = 'approve'; render();
-    return send(`approve ${date} ${d.token}`, 'Reservando en CPM…');
+    return send(`approve ${date} ${d.token}`, T('Reservando en CPM…', 'Booking in CPM…'));
   }
   pending[date] = 'skip'; render();
-  send(`skip ${date} ${d.token}`, 'Saltado. Puedes reabrirlo cuando quieras.');
+  send(`skip ${date} ${d.token}`, T('Saltado. Puedes reabrirlo cuando quieras.', 'Skipped. You can reopen it any time.'));
 }
 
 $('#main').addEventListener('click', async (e) => {
@@ -712,8 +727,8 @@ $('#main').addEventListener('click', async (e) => {
     const l = days[date]?.lines[Number(i)]; if (!l) return;
     if (rm.dataset.restore) return applyChange(date, { i: Number(i), skip: false });
     const yes = await confirmDialog({
-      title: '¿Quitar esta reunión?', icon: '✕', danger: true, ok: 'Quitar',
-      text: `<b>${esc(l.description)}</b><br>${l.start}–${l.end}${l.ticket ? ` · ${num(hours(l))} h` : ''}<br><br>No se reservará en CPM. La puedes volver a incluir con ↺.`,
+      title: T('¿Quitar esta reunión?', 'Remove this meeting?'), icon: '✕', danger: true, ok: T('Quitar', 'Remove'),
+      text: `<b>${esc(l.description)}</b><br>${l.start}–${l.end}${l.ticket ? ` · ${num(hours(l))} h` : ''}<br><br>${T('No se reservará en CPM. La puedes volver a incluir con ↺.', "It won't be booked in CPM. You can include it again with ↺.")}`,
     });
     if (yes) applyChange(date, { i: Number(i), skip: true });
     return;
@@ -730,6 +745,9 @@ $('#main').addEventListener('click', async (e) => {
 $('#bar').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) act(b); });
 $('#strip').addEventListener('click', (e) => { const b = e.target.closest('[data-day]'); if (b) pick(b.dataset.day); });
 $('#strip').addEventListener('change', (e) => { if (e.target.id === 'date') pick(e.target.value); });
+function setLangButton() { $('#lang').textContent = lang === 'en' ? 'ES' : 'EN'; document.documentElement.lang = lang; }
+$('#lang').onclick = () => { lang = lang === 'en' ? 'es' : 'en'; store.set('lang', lang); setLangButton(); renderStrip.done = false; render(); };
+setLangButton();
 $('#refresh').onclick = () => {
   if (!cfg.r) return;
   const r = $('#refresh'); r.classList.add('spin'); setTimeout(() => r.classList.remove('spin'), 1500);
@@ -753,7 +771,7 @@ function accept(raw) {
     const prev = days[m.date];
     // only a newer snapshot counts: replays of an older one would undo an unconfirmed edit
     if (prev && m.at <= prev.at) return false;
-    if (saving[m.date] || pending[m.date]) toast(m.status === 'booked' ? '✅ Reservado en CPM' : m.status === 'partial' ? '⚠️ Algunas entradas fallaron' : 'Listo');
+    if (saving[m.date] || pending[m.date]) toast(m.status === 'booked' ? T('✅ Reservado en CPM', '✅ Booked in CPM') : m.status === 'partial' ? T('⚠️ Algunas entradas fallaron', '⚠️ Some entries failed') : T('Listo', 'Done'));
     delete saving[m.date]; delete requested[m.date];
     days[m.date] = m;
     if (m.status !== 'pending' || pending[m.date] === 'reopen') delete pending[m.date];
