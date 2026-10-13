@@ -77,6 +77,9 @@
   .hero-total { font-size: 46px; font-weight: 780; letter-spacing: -.03em; line-height: 1; margin: 14px 0 4px; font-variant-numeric: tabular-nums; }
   .hero-total small { font-size: 20px; font-weight: 650; opacity: .85; margin-left: 2px; }
   .hero-sub { font-size: 14px; opacity: .88; }
+  .workday { margin-top: 10px; font-size: 14px; background: #ffffff1f; border-radius: 10px; padding: 7px 10px; }
+  .workday.muted { opacity: .8; }
+  .workday.warn { background: #ffffff33; font-weight: 600; margin-top: 6px; }
   .stats { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; }
   .stat { background: #ffffff24; border-radius: 999px; padding: 4px 10px; font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
   .stat b { width: 7px; height: 7px; border-radius: 50%; }
@@ -268,6 +271,7 @@ let catalog = parse('catalog', []);
 let copilot = store.get('copilot') || '';
 let searchKey = store.get('searchKey') || '';
 let lastAt = store.get('lastAt') || '';
+let workdays = parse('workdays', {}); // date -> the timesheet's start/end/pause/real for that day
 const pending = {};   // date -> 'approve' | 'skip' | 'reopen' sent, waiting for the VM
 const saving = {};    // dates with an edit the VM hasn't confirmed yet; Reservar waits for it
 const requested = {}; // date -> when the app asked the VM to draft/show it
@@ -337,6 +341,37 @@ function pick(date, { force = false } = {}) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+// Start/end of the day from your timesheet Excel, read by the Copilot server on the VM.
+const workdayLoading = new Set();
+async function loadWorkday(date, force = false) {
+  if (!copilot || !searchKey || workdayLoading.has(date)) return;
+  const known = workdays[date];
+  if (known && !force && Date.now() - known.fetched < 10 * 60e3) return;
+  workdayLoading.add(date);
+  try {
+    const r = await fetch(`${copilot}/workday?date=${date}`, { headers: { 'x-copilot-key': searchKey }, signal: AbortSignal.timeout(15000) });
+    if (r.ok) {
+      workdays[date] = { ...(await r.json()), fetched: Date.now() };
+      const keep = Object.keys(workdays).sort().slice(-40);
+      workdays = Object.fromEntries(keep.map((k) => [k, workdays[k]]));
+      store.set('workdays', JSON.stringify(workdays));
+      if (date === (selected || Object.keys(days).sort().at(-1))) render();
+    }
+  } catch {} finally { workdayLoading.delete(date); }
+}
+
+function workdayHtml(date, total, pendingDay) {
+  const w = workdays[date];
+  if (!w?.configured) return '';
+  if (!w.start) return `<div class="workday muted">🕘 Timesheet: sin hora de inicio todavía</div>`;
+  const span = `${w.start}–${w.end || '…'}`;
+  let html = `<div class="workday">🕘 ${span}${w.pause ? ` · pausa ${num(w.pause)} h` : ''}${w.real > 0 ? ` · <b>${num(w.real)} h</b> trabajadas` : ''}</div>`;
+  if (pendingDay && w.real > 0 && Math.abs(total - w.real) > 0.25) {
+    html += `<div class="workday warn">${total > w.real ? '⚠️ Vas a reservar más' : 'ℹ️ Vas a reservar menos'} de lo que trabajaste (${num(total)} h vs ${num(w.real)} h)</div>`;
+  }
+  return html;
+}
+
 function setStatus() {
   const el = $('#status');
   if (!lastAt) { el.className = 'status'; el.innerHTML = '<b></b>esperando datos…'; return; }
@@ -376,7 +411,8 @@ function heroHtml(d) {
   let html = `<section class="hero ${cls === 'pending' ? '' : cls}">
     <div class="hero-top"><span>${dayLabel(d.date)}</span><span class="hero-pill">${label}</span></div>
     <div class="hero-total">${num(total)}<small>h</small></div>
-    <div class="hero-sub">${sub}</div>`;
+    <div class="hero-sub">${sub}</div>
+    ${workdayHtml(d.date, total, d.status === 'pending')}`;
   if (d.lines.length) {
     html += '<div class="stats">';
     if (sure) html += `<span class="stat"><b style="background:#5ee0a0"></b>${sure} segura${sure === 1 ? '' : 's'}</span>`;
@@ -473,6 +509,7 @@ function render() {
   }
   main.innerHTML = html;
   renderBar(d);
+  if (current) loadWorkday(current);
 }
 let renderOthersOpen = false;
 document.addEventListener('toggle', (e) => { if (e.target.matches?.('details.others')) renderOthersOpen = e.target.open; }, true);
@@ -698,6 +735,7 @@ $('#refresh').onclick = () => {
   const r = $('#refresh'); r.classList.add('spin'); setTimeout(() => r.classList.remove('spin'), 1500);
   send('refresh');
   if (selected) pick(selected, { force: true });
+  loadWorkday(selected || Object.keys(days).sort().at(-1) || todayIso(), true);
   load();
 };
 
