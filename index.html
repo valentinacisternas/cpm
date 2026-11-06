@@ -105,6 +105,7 @@
   .mt .title { grid-column: 2; grid-row: 1; }
   .mt .tags { grid-column: 2; grid-row: 2; }
   .mt .h { grid-column: 3; }
+  .mt .t .real { color: var(--accent); font-weight: 650; }
   .mt .t b { display: block; font-size: 15px; } .mt .t span { font-size: 12.5px; color: var(--muted); }
   .mt .title { font-weight: 640; font-size: 15.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mt .h { grid-row: 1 / span 2; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 15px; text-align: right; }
@@ -264,7 +265,9 @@
   .chip small { display: block; color: var(--muted); font-size: 12px; }
   .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
   .chips .hint { margin: 2px 4px; }
-  .trow { display: flex; align-items: center; gap: 6px; }
+  .trow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .ticket .pname { display: block; font-size: 14.5px; line-height: 1.35; overflow-wrap: anywhere; }
+  .chip b { font-weight: 600; }
   .bud { margin-left: auto; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--card-2); color: var(--muted); white-space: nowrap; }
   .bud.green { background: var(--green-soft); color: var(--green); } .bud.amber { background: var(--amber-soft); color: var(--amber); } .bud.red { background: var(--red-soft); color: var(--red); }
   .mine { font-size: 11px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; }
@@ -289,6 +292,23 @@
   .sheet .switch[hidden] { display: none; }
   .tag.trav { background: #efe8fe; color: #6b3fd6; border-color: transparent; }
   @media (prefers-color-scheme: dark) { .tag.trav { background: #2a2145; color: #b9a2f7; } }
+  .day em { font-style: normal; font-size: 10.5px; font-weight: 650; color: var(--muted); font-variant-numeric: tabular-nums; min-height: 13px; }
+  .day[aria-pressed="true"] em { color: #ffffffd0; }
+  .day.missing { box-shadow: inset 0 0 0 1.5px var(--red-soft), var(--shadow); }
+  .week { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); padding: 11px 14px; margin-bottom: 12px; font-size: 14px; }
+  .week-head { font-weight: 700; margin-bottom: 6px; }
+  .week-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; flex-wrap: wrap; }
+  .week-row.miss { color: var(--red); }
+  .week .btn.primary { flex: none; }
+  .chips-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mini { border: 0; background: var(--red-soft); color: var(--red); border-radius: 8px; padding: 4px 9px; font-size: 13px; font-weight: 650; }
+  .vm-do { display: flex; gap: 8px; margin-top: 8px; }
+  .cf-row { display: flex; gap: 6px; text-align: left; font-size: 13.5px; padding: 3px 0; } .cf-row span { margin-left: auto; white-space: nowrap; color: var(--ink); }
+  details.more { margin-top: 18px; } details.more > summary { list-style: none; cursor: pointer; font-size: 14px; font-weight: 650; color: var(--accent); padding: 4px; }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary::before { content: '▸ '; } details.more[open] > summary::before { content: '▾ '; }
+  details.more > summary span { color: var(--muted); font-weight: 500; }
+  details.more .switches { margin-top: 8px; }
   .addline { display: block; width: 100%; margin-top: 8px; padding: 13px 16px; border: 1.5px dashed var(--line); border-radius: 16px; background: none;
     color: var(--accent); font-weight: 650; text-align: left; }
   .addline small { display: block; color: var(--muted); font-weight: 500; font-size: 12.5px; }
@@ -352,6 +372,10 @@ const ticketAsked = {};                       // project id -> when the app aske
 const hints = {};                             // hint id -> [[project, ticket, subject, chargeable, score]]
 const parts = {};                             // long lists arrive in parts; joined here
 let editorHook = null;                        // redraws the open editor when its data arrives
+let cpmDays = parse('cpmDays', {});           // date -> hours CPM already has (the week view)
+const waitSince = {};                         // date -> when the app started waiting for the VM
+const lastCmd = {};                           // date -> the last command sent for it (for Retry)
+const VM_PATIENCE = 30000;                    // after this the app says the VM isn't answering
 const pending = {};   // date -> 'approve' | 'skip' | 'reopen' sent, waiting for the VM
 const saving = {};    // dates with an edit the VM hasn't confirmed yet; Reservar waits for it
 const requested = {}; // date -> when the app asked the VM to draft/show it
@@ -407,6 +431,11 @@ function toast(msg, ms = 2600) {
 }
 
 async function send(cmd, label) {
+  const [verb, date] = cmd.split(' ');
+  if (/^(edit|add|approve|skip|reopen|draft)$/.test(verb) && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    lastCmd[date] = cmd;
+    waitSince[date] ??= Date.now();
+  }
   try {
     const r = await fetch(`${NTFY}/${cfg.r}`, { method: 'POST', body: cmd });
     if (!r.ok) throw new Error(r.status);
@@ -467,17 +496,34 @@ function setStatus() {
 
 /* ---------- rendering ---------- */
 
-function renderStrip(current) {
-  // the last two working weeks, newest on the right
+// A day's state across the draft and CPM itself: booked (here or elsewhere), to review,
+// nothing at all (a past weekday with no draft and no hours in CPM), or off.
+const isWeekday = (k) => { const g = toDate(k).getDay(); return g > 0 && g < 6; };
+function dayState(k) {
+  const d = days[k], inCpm = cpmDays[k] ?? 0;
+  if (d && ['booked', 'partial', 'already'].includes(d.status)) return d.status === 'partial' ? 'bad' : 'done';
+  if (inCpm > 0) return 'done';
+  if (d?.status === 'pending') return 'pending';
+  if (d) return 'off';
+  return isWeekday(k) && k < todayIso() ? 'missing' : '';
+}
+// the last two working weeks, newest on the right
+function stripDays(current) {
   const out = [];
   for (let d = new Date(), n = 0; out.length < 10 && n < 20; n++, d.setDate(d.getDate() - 1)) {
     if (d.getDay() === 0 || d.getDay() === 6) { if (iso(d) !== current && !days[iso(d)]) continue; }
     out.unshift(iso(d));
   }
+  return out;
+}
+function renderStrip(current) {
+  const out = stripDays(current);
   const strip = $('#strip');
   strip.innerHTML = out.map((k) => {
-    const d = toDate(k), st = days[k] ? (STATUS[days[k].status] ?? ['off'])[0] : '';
-    return `<button class="day" data-day="${k}" aria-pressed="${k === current}"><small>${k === todayIso() ? T('Hoy', 'Today') : DAYS_SHORT[lang][d.getDay()]}</small><span>${d.getDate()}</span><i class="${st}"></i></button>`;
+    const d = toDate(k), state = dayState(k);
+    const st = state === 'missing' ? 'bad' : state;
+    const h = cpmDays[k] > 0 ? cpmDays[k] : days[k]?.entries?.length ? totalOf(days[k]) : 0;
+    return `<button class="day${state === 'missing' ? ' missing' : ''}" data-day="${k}" aria-pressed="${k === current}"><small>${k === todayIso() ? T('Hoy', 'Today') : DAYS_SHORT[lang][d.getDay()]}</small><span>${d.getDate()}</span><em>${h ? `${num(h)}h` : state === 'missing' ? '–' : ''}</em><i class="${st}"></i></button>`;
   }).join('') + `<label class="day cal" aria-label="${T('Otra fecha', 'Other date')}">📅<input type="date" id="date" max="${todayIso()}" value="${current || todayIso()}"></label>`;
   const on = strip.querySelector('[aria-pressed="true"]');
   if (on && !renderStrip.done) { on.scrollIntoView({ inline: 'end', block: 'nearest' }); renderStrip.done = true; }
@@ -508,6 +554,12 @@ function heroHtml(d) {
     html += '</div>';
   }
   return html + '</section>';
+}
+
+function vmSilentHtml(date) {
+  const secs = Math.round((Date.now() - (waitSince[date] ?? requested[date] ?? Date.now())) / 1000);
+  return `<div class="banner red vm"><span>📡</span><span><b>${T('La VM no responde', "The VM isn't answering")}</b> (${secs >= 120 ? `${Math.round(secs / 60)} min` : `${secs} s`}). ${T('¿Está encendida y con sesión iniciada? Puedes reintentar o dejar de esperar; si dejas de esperar, tus últimos cambios podrían no estar guardados.', 'Is it on and signed in? You can retry or stop waiting; if you stop waiting, your last changes may not be saved.')}
+    <span class="vm-do"><button class="btn quiet sm" data-retry="${date}">${T('Reintentar', 'Retry')}</button><button class="btn quiet sm" data-giveup="${date}">${T('Dejar de esperar', 'Stop waiting')}</button></span></span></div>`;
 }
 
 /* ---------- Red Bull travel days ---------- */
@@ -556,7 +608,7 @@ function travelHtml(d, editable) {
         : T('No sé si es Elsbethen (1 h por trayecto) o Ludesch (50 % del viaje no trabajado): toca el viaje para elegir las horas.', "I can't tell if it's Elsbethen (1 h per trip) or Ludesch (50 % of the unworked trip): tap the trip to set the hours.");
     html += `<div class="trip"><div class="trip-name">${esc(t.l.description)}${t.l.start ? ` · ${t.l.start}–${t.l.end}` : ''}</div><div class="trip-rule">${what}</div>`;
     if (t.suggest != null && tk) {
-      html += `<div class="trip-do"><span>${T('Sugerencia', 'Suggestion')}: <b>${num(t.suggest)} h</b> · Travel Time (Red Bull) · <b>${esc(tk.ticket)}</b></span>`
+      html += `<div class="trip-do"><span>${T('Sugerencia', 'Suggestion')}: <b>${num(t.suggest)} h</b> · Travel Time (Red Bull) · <b>${esc(tname(tk.ticket))}</b></span>`
         + (done ? `<span class="ok">✓ ${T('aplicado', 'applied')}</span>` : editable ? `<button class="btn quiet sm" data-trip="${d.date}|${t.i}|${t.suggest}|${esc(tk.ticket)}|${esc(tk.project)}|${t.real ?? ''}|${place}">${T('Aplicar', 'Apply')}</button>` : '')
         + '</div>';
     }
@@ -570,11 +622,22 @@ function travelHtml(d, editable) {
   return html;
 }
 
+// She never uses CPM's numbers: projects without their code, tickets by name.
+const pname = (name) => String(name ?? '').trim().replace(/^\d{3,4}(-[\w]+)?\s+/, '');
+const tname = (ticket, subject) => subject || subjectOf(ticket) || ticket;
+// a ticket's name: from the VM's snapshot, else whatever list the app already has
+function subjectOf(ticket, known) {
+  if (known) return known;
+  const c = catalog.find((r) => r[1] === ticket); if (c?.[2]) return c[2];
+  for (const t of Object.values(ticketsByProject)) { const r = t.rows.find((x) => x[0] === ticket); if (r) return r[1]; }
+  return '';
+}
+
 function meetingHtml(d, l, i, editable) {
   const kind = l.skip ? 'off' : !l.ticket ? 'none' : l.tentative ? 'unsure' : 'ok';
   const edited = typeof l.hours === 'number';
   const tags = l.skip ? `<span class="tag">${T('No se reserva', 'Not booked')}</span>`
-    : l.ticket ? `<span class="tag">${esc(l.ticket)}</span>${l.activity === 'travel' ? `<span class="tag trav">🚆 ${isRb(l.project) ? T('viaje RB', 'RB travel') : T('viaje externo', 'external travel')}</span>` : ''}<span class="proj">${esc(l.project)}${l.chargeable === false && l.activity !== 'travel' ? T(' · no fact.', ' · non-bill.') : ''}</span>`
+    : l.ticket ? `${l.activity === 'travel' ? `<span class="tag trav">🚆 ${isRb(l.project) ? T('viaje RB', 'RB travel') : T('viaje externo', 'external travel')}</span>` : ''}<span class="proj" title="${esc(pname(l.project))}">${esc(subjectOf(l.ticket, l.subject) || pname(l.project) || l.ticket)}${l.chargeable === false && l.activity !== 'travel' ? T(' · no fact.', ' · non-bill.') : ''}</span>`
     : `<span class="tag red">${T('Sin ticket', 'No ticket')}</span><span class="proj">${T('toca para asignar', 'tap to assign')}</span>`;
   // a div, not a button: the card holds its own ✕ / ↺ button
   const attrs = editable ? `data-line="${d.date}|${i}" role="button" tabindex="0"` : '';
@@ -582,7 +645,7 @@ function meetingHtml(d, l, i, editable) {
     : l.skip ? `<button class="rm undo" data-restore="${d.date}|${i}" aria-label="${T('Volver a incluir', 'Include again')}">↺</button>`
     : `<button class="rm" data-remove="${d.date}|${i}" aria-label="${T('Quitar de la reserva', 'Remove from booking')}">✕</button>`;
   return `<div class="mt ${kind}${editable ? ' has-rm' : ' static'}" ${attrs}>
-    <div class="t">${l.manual ? `<b>＋</b><span>${T('a mano', 'manual')}</span>` : `<b>${l.start}</b><span>${l.end}</span>`}</div>
+    <div class="t">${l.manual ? `<b>＋</b><span>${T('a mano', 'manual')}</span>` : `<b>${l.start}</b><span${l.plannedEnd ? ` class="real" title="${T('real time; planeado hasta', 'real time; planned until')} ${l.plannedEnd}"` : ''}>${l.end}${l.plannedEnd ? ' ⏱' : ''}</span>`}</div>
     <div class="title">${esc(l.description) || `<span style="color:var(--muted)">${T('(sin comentario)', '(no comment)')}</span>`}</div>
     <div class="h${edited ? ' edited' : ''}">${l.skip ? '–' : num(hours(l))}<small>${edited ? T('editado', 'edited') : 'h'}</small></div>
     <div class="tags">${tags}</div>
@@ -617,11 +680,26 @@ function render() {
       <div class="legend"><span><b style="background:var(--green)"></b>${T('seguro', 'sure')}</span><span><b style="background:var(--amber)"></b>${T('revisa el ticket', 'check the ticket')}</span><span><b style="background:var(--red)"></b>${T('falta ticket', 'no ticket')}</span></div>
       <p>${T('Otro día: tócalo arriba o usa 📅.', 'Another day: tap it above or use 📅.')}</p></section>`;
   }
+  // the week at a glance: days still to book, and weekdays with nothing in CPM
+  {
+    const span = stripDays(current).filter((k) => k <= todayIso() && isWeekday(k));
+    const toBook = span.filter((k) => dayState(k) === 'pending' && days[k].entries.length && !pending[k]);
+    const missing = span.filter((k) => dayState(k) === 'missing');
+    if (toBook.length || missing.length) {
+      html += `<section class="week"><div class="week-head">📅 ${T('Estas dos semanas', 'These two weeks')}</div>`;
+      if (toBook.length) html += `<div class="week-row"><span>${T(`<b>${toBook.length}</b> día${toBook.length === 1 ? '' : 's'} por reservar`, `<b>${toBook.length}</b> day${toBook.length === 1 ? '' : 's'} to book`)} (${toBook.map((k) => `${DAYS_SHORT[lang][toDate(k).getDay()]} ${toDate(k).getDate()}`).join(', ')})</span>`
+        + `<button class="btn primary sm" data-bookweek="${toBook.join(',')}">${T('Reservar', 'Book')} ${toBook.length}</button></div>`;
+      if (missing.length) html += `<div class="week-row miss"><span>${T(`<b>${missing.length}</b> sin nada en CPM`, `<b>${missing.length}</b> with nothing in CPM`)}:</span><span class="chips-row">${missing.map((k) => `<button class="mini" data-day="${k}">${DAYS_SHORT[lang][toDate(k).getDay()]} ${toDate(k).getDate()}</button>`).join('')}</span></div>`;
+      html += '</section>';
+    }
+  }
   const d = days[current];
   if (!current) {
     html += `<div class="empty"><b>${T('Todavía no hay borradores', 'No drafts yet')}</b>${T('Llegan de lunes a viernes a las 17:30, o elige un día arriba.', 'They arrive Monday to Friday at 17:30, or pick a day above.')}</div>`;
   } else if (!d) {
-    html += requested[current]
+    html += requested[current] && Date.now() - requested[current] > VM_PATIENCE
+      ? vmSilentHtml(current)
+      : requested[current]
       ? `<div class="skeleton"></div><p class="note" style="text-align:center">${T(`Armando el borrador del ${dayLabel(current).toLowerCase()}… unos segundos.`, `Building the draft for ${dayLabel(current)}… a few seconds.`)}</p>`
       : `<div class="empty"><b>${dayLabel(current)}</b>${T('Sin borrador todavía.', 'No draft yet.')}<br><br><button class="btn quiet" data-ask="${current}">${T('Pedir a la VM', 'Ask the VM')}</button></div>`;
   } else {
@@ -629,9 +707,11 @@ function render() {
     html += heroHtml(d);
     const live = d.lines.filter((l) => !l.skip && !l.manual);
     const overlaps = live.filter((l, i) => live.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
-    if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${T(`${overlaps} reuniones se solapan y sus horas se suman. Toca una para bajarle las horas o excluirla.`, `${overlaps} meetings overlap and their hours add up. Tap one to lower its hours or leave it out.`)}</span></div>`;
+    if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${T(`${overlaps} reuniones se solapan y sus horas se suman. Está bien si trabajabas en otra cosa a la vez; si no, toca una para bajarle las horas.`, `${overlaps} meetings overlap and their hours add up. That's fine if you were working on something else meanwhile; if not, tap one to lower its hours.`)}</span></div>`;
+    if (editable && cpmDays[d.date] > 0) html += `<div class="banner amber"><span>ℹ️</span><span>${T(`CPM ya tiene <b>${num(cpmDays[d.date])} h</b> este día (reservadas por otro lado). Si reservas, la VM lo bloqueará para no duplicar; usa <b>＋ Agregar entrada</b> para sumar horas.`, `CPM already has <b>${num(cpmDays[d.date])} h</b> on this day (booked elsewhere). Booking would be blocked to avoid duplicates; use <b>＋ Add entry</b> to add hours.`)}</span></div>`;
     html += travelHtml(d, editable);
-    if (saving[d.date]) html += `<div class="banner blue"><span>⏳</span><span>${T('Guardando tus cambios en la VM…', 'Saving your changes on the VM…')}</span></div>`;
+    if ((saving[d.date] || pending[d.date]) && Date.now() - (waitSince[d.date] ?? Date.now()) > VM_PATIENCE) html += vmSilentHtml(d.date);
+    else if (saving[d.date]) html += `<div class="banner blue"><span>⏳</span><span>${T('Guardando tus cambios en la VM…', 'Saving your changes on the VM…')}</span></div>`;
 
     if (d.lines.length) {
       html += `<div class="section"><h2>${T('Reuniones', 'Meetings')}</h2><span>${editable ? T('toca para editar', 'tap to edit') : ''}</span></div><div class="list">`;
@@ -644,17 +724,17 @@ function render() {
     }
     if (d.topUp && d.inCpm?.length) {
       html += `<div class="section"><h2>${T('Ya en CPM', 'Already in CPM')}</h2><span>${num(d.inCpm.reduce((s, e) => s + e.hours, 0))} h</span></div><div class="rows">`;
-      for (const e of d.inCpm) html += `<div><span>${esc(e.ticket)} · ${esc(e.project)}</span><b>${num(e.hours)} h</b></div>`;
+      for (const e of d.inCpm) html += `<div><span>${esc(tname(e.ticket, e.subject))} · ${esc(pname(e.project))}</span><b>${num(e.hours)} h</b></div>`;
       html += '</div>';
     }
     if (d.status === 'already' && d.entries.length) {
       html += `<div class="section"><h2>${T('En CPM', 'In CPM')}</h2></div><div class="rows">`;
-      for (const e of d.entries) html += `<div><span>${esc(e.ticket)} · ${esc(e.project)}</span><b>${num(e.hours)} h</b></div>`;
+      for (const e of d.entries) html += `<div><span>${esc(tname(e.ticket, e.subject))} · ${esc(pname(e.project))}</span><b>${num(e.hours)} h</b></div>`;
       html += '</div>';
     }
     if (d.results?.length) {
       html += `<div class="section"><h2>${T('Resultado', 'Result')}</h2></div><div class="rows">`;
-      for (const r of d.results) html += `<div class="${r.ok ? '' : 'bad'}"><span>${r.ok ? '✓' : '✗'} ${esc(r.ticket)}${r.ok ? '' : ' · ' + esc(r.error)}</span><b>${num(r.hours)} h</b></div>`;
+      for (const r of d.results) html += `<div class="${r.ok ? '' : 'bad'}"><span>${r.ok ? '✓' : '✗'} ${esc(tname(r.ticket))}${r.ok ? '' : ' · ' + esc(r.error)}</span><b>${num(r.hours)} h</b></div>`;
       html += '</div>';
     }
   }
@@ -822,7 +902,7 @@ function openEditor(date, i) {
     hours: typeof l.hours === 'number' ? l.hours : null, description: l.description || '' };
   if (!projects.length) send('projects');
   let pid = projectIdOf(draft.project);
-  const opt = (p) => `<option value="${p[0]}">${esc(p[1])}</option>`;
+  const opt = (p) => `<option value="${p[0]}">${esc(pname(p[1]))}</option>`;
   // the options are rebuilt when your project list arrives while the editor is open
   const projectOptions = () => {
     const recent = projects.filter((p) => p[2]), other = projects.filter((p) => !p[2]);
@@ -832,6 +912,10 @@ function openEditor(date, i) {
       ${projects.length ? '' : `<option value="" disabled>${T('Cargando tus proyectos…', 'Loading your projects…')}</option>`}`;
   };
 
+  // billable / travel / Reisezeit / Einsatzort / don't book: folded away unless this entry uses them
+  const moreBits = [l.chargeable === false && T('no facturable', 'non-billable'), l.activity === 'travel' && T('viaje', 'travel'), l.place, l.skip && T('no se reserva', 'not booked')].filter(Boolean);
+  const moreOpen = moreBits.length > 0 || TRIP.test(l.description || '');
+  const moreSummary = moreBits.length ? ` · ${esc(moreBits.join(' · '))}` : T(' · facturable, viaje, Einsatzort', ' · billable, travel, Einsatzort');
   const bg = document.createElement('div');
   bg.className = 'sheet-bg';
   bg.innerHTML = `<div class="sheet" role="dialog" aria-label="${adding ? T('Nueva entrada', 'New entry') : T('Editar reunión', 'Edit meeting')}">
@@ -839,7 +923,7 @@ function openEditor(date, i) {
     <div class="sheet-body">
       <h3>${adding ? T('Nueva entrada', 'New entry') : esc(l.description) || T('Entrada', 'Entry')}</h3>
       <div class="sub">${manual ? (adding ? T(`Se suma a ${dayLabel(date).toLowerCase()}`, `Added to ${dayLabel(date)}`) + (d && d.status !== 'pending' ? T(' · además de lo que ya está en CPM', ' · on top of what is already in CPM') : '') : T('Entrada agregada a mano', 'Entry added by hand'))
-        : `${l.start}–${l.end} · ${num(duration(l))} h ${T('en el calendario', 'in the calendar')}`}</div>
+        : `${l.start}–${l.end} · ${num(duration(l))} h ${T('en el calendario', 'in the calendar')}${l.plannedEnd ? ` · ⏱ ${T(`real time (planeada hasta ${l.plannedEnd})`, `real time (planned until ${l.plannedEnd})`)}` : ''}`}</div>
       ${manual ? `<label for="desc">${T('Comentario', 'Comment')}</label>
         <textarea id="desc" rows="2" placeholder="${T('Qué hiciste, p. ej. “Scanner logic master pack”', 'What you did, e.g. “Scanner logic master pack”')}"></textarea>` : ''}
       <label>${T('Según tu historial', 'From your history')}</label>
@@ -855,6 +939,7 @@ function openEditor(date, i) {
         <input type="number" id="hrs" min="0" max="24" step="0.25" inputmode="decimal">
         <button class="step" data-step="0.25" aria-label="${T('Más', 'More')}">+</button>
         ${manual ? '' : `<button class="btn quiet" id="reset">${T('Duración', 'Duration')}</button>`}</div>
+      <details class="more"${moreOpen ? ' open' : ''}><summary>${T('Más opciones', 'More options')}<span>${moreSummary}</span></summary>
       <div class="switches">
         <label class="switch">${T('Facturable', 'Billable')}<input type="checkbox" id="charge"></label>
         <label class="switch">🚆 ${T('Tiempo de viaje', 'Travel time')}<input type="checkbox" id="travel"></label>
@@ -863,6 +948,7 @@ function openEditor(date, i) {
         <label class="switch field">Einsatzort<input type="text" id="place" placeholder="concircle office" autocomplete="off"></label>
         ${adding ? '' : `<label class="switch">${T('No reservar esta entrada', "Don't book this entry")}<input type="checkbox" id="skipLine"></label>`}
       </div>
+      </details>
     </div>
     <div class="sheet-foot"><button class="btn quiet" id="cancel">${T('Cancelar', 'Cancel')}</button><button class="btn primary" id="ok">${adding ? T('Agregar', 'Add') : T('Guardar', 'Save')}</button></div>
   </div>`;
@@ -937,7 +1023,7 @@ function openEditor(date, i) {
     }
     hintsEl.innerHTML = rows.length
       ? rows.slice(0, 4).map((r) => `<button class="chip" data-hp="${esc(r[0])}" data-ht="${esc(r[1])}" data-hc="${r[3]}" aria-pressed="${r[1] === draft.ticket}">
-          <b>${esc(r[1])}</b> ${esc(r[2] || '')}<small>${esc(r[0].trim())}</small></button>`).join('')
+          <b>${esc(r[2] || r[1])}</b><small>${esc(pname(r[0]))}</small></button>`).join('')
       : `<p class="hint">${T('Nada parecido en tu historial.', 'Nothing similar in your history.')}</p>`;
   }
   hintsEl.addEventListener('click', (e) => {
@@ -949,15 +1035,15 @@ function openEditor(date, i) {
   const SEARCHING = T('Buscando en CPM…', 'Searching CPM…');
   let remote = [], remoteState = '', searchCtl, timer;
   const row = (r, extra = '') => `<button class="ticket" data-t="${esc(r[1])}" data-p="${esc(r[0])}" aria-pressed="${r[1] === draft.ticket}">
-      <b>${esc(r[1])}</b> · ${esc(r[0])}${extra}<small>${esc(r[2] || ' ')}</small></button>`;
+      <b>${esc(r[2] || r[1])}</b>${extra}<small>${esc(pname(r[0]))}</small></button>`;
   const prow = (r) => `<button class="ticket" data-t="${esc(r[0])}" data-p="${esc(projectName(pid))}" aria-pressed="${r[0] === draft.ticket}">
-      <span class="trow"><b>${esc(r[0])}</b>${r[4] ? `<span class="mine">${T('tuyo', 'yours')}</span>` : ''}${budgetTag(r, Number(hrs.value) || 0)}</span><small>${esc(r[1])}</small></button>`;
+      <span class="pname">${esc(r[1])}</span><span class="trow">${r[4] ? `<span class="mine">${T('tuyo', 'yours')}</span>` : ''}${budgetTag(r, Number(hrs.value) || 0)}</span></button>`;
 
   function drawPicked() {
     if (!draft.ticket) { picked.innerHTML = `<span class="none">${T('sin elegir', 'none chosen')}</span>`; pickedFull.textContent = ''; return; }
     const pr = (ticketsByProject[projectIdOf(draft.project)]?.rows ?? []).find((r) => r[0] === draft.ticket);
     const c = catalog.find((r) => r[1] === draft.ticket);
-    picked.innerHTML = `· <b>${esc(draft.ticket)}</b>`;
+    picked.innerHTML = '';
     pickedFull.textContent = pr?.[1] ?? c?.[2] ?? '';
   }
 
@@ -1150,6 +1236,24 @@ function confirmDialog({ title, text, ok, icon = '?', danger = false }) {
 
 /* ---------- interaction ---------- */
 
+// "Book N": the selected days one after another, after one confirmation
+async function bookWeek(list) {
+  const ok = list.filter((k) => days[k]?.status === 'pending' && days[k].entries.length);
+  if (!ok.length) return;
+  const total = ok.reduce((s, k) => s + totalOf(days[k]), 0);
+  const yes = await confirmDialog({
+    title: T(`¿Reservar ${ok.length} día${ok.length === 1 ? '' : 's'} en CPM?`, `Book ${ok.length} day${ok.length === 1 ? '' : 's'} in CPM?`), icon: '✓',
+    ok: `${T('Reservar', 'Book')} ${num(total)} h`,
+    text: ok.map((k) => `<b>${dayLabel(k)}</b>: ${num(totalOf(days[k]))} h`).join('<br>')
+      + `<br><br><span style="font-size:13px">${T('Revisa antes los días con reuniones solapadas.', 'Check days with overlapping meetings first.')}</span>`,
+  });
+  if (!yes) return;
+  for (const k of ok) { pending[k] = 'approve'; }
+  render();
+  for (const k of ok) { await send(`approve ${k} ${days[k].token}`); await new Promise((r) => setTimeout(r, 800)); }
+  toast(T('Reservando en CPM…', 'Booking in CPM…'));
+}
+
 async function act(b) {
   const date = b.dataset.approve || b.dataset.skip || b.dataset.reopen;
   const d = days[date]; if (!d) return;
@@ -1157,7 +1261,7 @@ async function act(b) {
   if (b.dataset.approve) {
     const yes = await confirmDialog({
       title: T('¿Reservar en CPM?', 'Book in CPM?'), icon: '✓', ok: `${T('Reservar', 'Book')} ${num(totalOf(d))} h`,
-      text: `<b>${dayLabel(date)}</b><br>${T(`${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'}`, `${d.entries.length} entr${d.entries.length === 1 ? 'y' : 'ies'}`)}: ${d.entries.map((e) => `${esc(e.ticket)} ${num(e.hours)} h`).join(', ')}`,
+      text: `<b>${dayLabel(date)}</b><br>${T(`${d.entries.length} entrada${d.entries.length === 1 ? '' : 's'}`, `${d.entries.length} entr${d.entries.length === 1 ? 'y' : 'ies'}`)}: <br>${d.entries.map((e) => `<span class="cf-row">${esc(tname(e.ticket, e.subject).slice(0, 70))}<span>${num(e.hours)} h</span></span>`).join('')}`,
     });
     if (!yes) return;
     pending[date] = 'approve'; render();
@@ -1180,6 +1284,23 @@ $('#main').addEventListener('click', async (e) => {
     if (yes) applyChange(date, { i: Number(i), skip: true });
     return;
   }
+  const retry = e.target.closest('[data-retry]');
+  if (retry) {
+    const k = retry.dataset.retry;
+    waitSince[k] = Date.now(); if (requested[k]) requested[k] = Date.now();
+    send(lastCmd[k] ?? `draft ${k}`, T('Reenviado a la VM…', 'Sent to the VM again…'));
+    return render();
+  }
+  const giveup = e.target.closest('[data-giveup]');
+  if (giveup) {
+    const k = giveup.dataset.giveup;
+    delete saving[k]; delete pending[k]; delete waitSince[k]; delete requested[k];
+    return render();
+  }
+  const week = e.target.closest('[data-bookweek]');
+  if (week) return bookWeek(week.dataset.bookweek.split(','));
+  const jump = e.target.closest('.week [data-day]');
+  if (jump) return pick(jump.dataset.day);
   const trip = e.target.closest('[data-trip]');
   if (trip) {
     const [date, i, h, ticket, project, real, place] = trip.dataset.trip.split('|');
@@ -1238,6 +1359,13 @@ function accept(raw) {
     copilot = m.url; store.set('copilot', copilot);
     if (m.key) { searchKey = m.key; store.set('searchKey', searchKey); }
   }
+  if (m.kind === 'week' && Array.isArray(m.rows) && !(store.get('weekAt') > m.at)) {
+    for (const k of Object.keys(cpmDays)) if (k >= m.from && k <= m.to) delete cpmDays[k];
+    for (const [k, h] of m.rows) cpmDays[k] = h;
+    const keep = Object.keys(cpmDays).sort().slice(-40);
+    cpmDays = Object.fromEntries(keep.map((k) => [k, cpmDays[k]]));
+    store.set('cpmDays', JSON.stringify(cpmDays)); store.set('weekAt', m.at);
+  }
   if (['catalog', 'projects', 'tickets', 'hint'].includes(m.kind) && Array.isArray(m.rows)) {
     const key = `${m.kind}|${m.project ?? m.id ?? ''}|${m.at}`;
     const p = (parts[key] ??= { of: m.of || 1, got: new Map() });
@@ -1266,7 +1394,7 @@ function accept(raw) {
     // only a newer snapshot counts: replays of an older one would undo an unconfirmed edit
     if (prev && m.at <= prev.at) return false;
     if (saving[m.date] || pending[m.date]) toast(m.status === 'booked' ? T('✅ Reservado en CPM', '✅ Booked in CPM') : m.status === 'partial' ? T('⚠️ Algunas entradas fallaron', '⚠️ Some entries failed') : T('Listo', 'Done'));
-    delete saving[m.date]; delete requested[m.date];
+    delete saving[m.date]; delete requested[m.date]; delete waitSince[m.date];
     days[m.date] = m;
     if (m.status !== 'pending' || pending[m.date] === 'reopen') delete pending[m.date];
     const keep = Object.keys(days).sort().slice(-30);
@@ -1303,8 +1431,10 @@ function live() {
 }
 
 render(); load(); live();
+if (cfg.r && Date.now() - (Date.parse(store.get('weekAt') || '') || 0) > 30 * 60e3) send('week');
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { load(); live(); } });
 setInterval(setStatus, 30000);
+setInterval(() => { if (Object.keys(waitSince).length || Object.keys(requested).length) render(); }, 10000);
 </script>
 </body>
 </html>
