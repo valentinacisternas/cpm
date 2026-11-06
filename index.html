@@ -271,6 +271,24 @@
   .sheet .ticket small { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; margin-top: 1px; }
   .picked-full { margin: -2px 4px 8px; font-size: 13.5px; color: var(--ink-2); line-height: 1.35; }
   .hint a { color: var(--accent); }
+  .travel { margin-top: 12px; background: var(--card); border-radius: 16px; box-shadow: var(--shadow); padding: 12px 14px; font-size: 14px; border-left: 4px solid #8a5cf6; }
+  .travel-head { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .trip { padding: 8px 0; border-top: 1px solid var(--line); }
+  .trip:first-of-type { border-top: 0; }
+  .trip-name { font-weight: 640; }
+  .trip-rule { color: var(--ink-2); margin: 2px 0 6px; line-height: 1.4; }
+  .trip-do { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--card-2); border-radius: 10px; padding: 7px 9px; }
+  .trip-do .ok { color: var(--green); font-weight: 700; white-space: nowrap; }
+  .btn.sm { padding: 7px 12px; font-size: 14px; border-radius: 10px; flex: none; }
+  .trip-sum { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); line-height: 1.45; }
+  .trip-src { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .sheet .trav-note { margin: 0; padding: 0 14px 12px; }
+  .sheet .switch.field input { appearance: auto; width: 140px; height: auto; border-radius: 10px; background: var(--card-2); border: 1px solid var(--line);
+    padding: 8px 10px; font-size: 16px; color: var(--ink); text-align: right; }
+  .sheet .switch.field input::after { display: none; }
+  .sheet .switch[hidden] { display: none; }
+  .tag.trav { background: #efe8fe; color: #6b3fd6; border-color: transparent; }
+  @media (prefers-color-scheme: dark) { .tag.trav { background: #2a2145; color: #b9a2f7; } }
   .addline { display: block; width: 100%; margin-top: 8px; padding: 13px 16px; border: 1.5px dashed var(--line); border-radius: 16px; background: none;
     color: var(--accent); font-weight: 650; text-align: left; }
   .addline small { display: block; color: var(--muted); font-weight: 500; font-size: 12.5px; }
@@ -362,9 +380,9 @@ function toEntries(lines) {
   const groups = new Map();
   for (const l of lines) {
     const h = hours(l);
-    if (l.skip || !l.ticket || h <= 0) continue;
-    const key = `${l.project}|${l.ticket}|${l.chargeable}`;
-    const g = groups.get(key) ?? { project: l.project, ticket: l.ticket, hours: 0 };
+    if (l.skip || !l.ticket || (h <= 0 && !(l.travelHours > 0))) continue;
+    const key = `${l.project}|${l.ticket}|${l.chargeable}|${l.activity ?? ''}|${l.place ?? ''}`;
+    const g = groups.get(key) ?? { project: l.project, ticket: l.ticket, activity: l.activity, hours: 0 };
     g.hours += h; groups.set(key, g);
   }
   return [...groups.values()].map((g) => ({ ...g, hours: round2(g.hours) }));
@@ -492,11 +510,71 @@ function heroHtml(d) {
   return html + '</section>';
 }
 
+/* ---------- Red Bull travel days ---------- */
+
+// The rules from "Korrektes Buchen der Stunden bei RB" (Michaela Matejková, 17.03.2026):
+//   Elsbethen: +1 h per trip, whatever it really took.
+//   Ludesch:   50 % of the travel time per trip, of the part you did NOT work on the train.
+// In CPM it is the activity "Travel Time (Red Bull)" on the trip's Red Bull ticket; in the
+// RB system the whole day (work + travel time) goes in as ONSITE.
+const TRIP = /m(ü|u|ue)nchen|munich|ludesch|elsbethen/i;
+const isRb = (project) => /red bull|solid premix|^025-/i.test(project || '');
+function tripsOf(d) {
+  return d.lines.map((l, i) => ({ l, i })).filter(({ l }) => !l.skip && TRIP.test(l.description || '')).map(({ l, i }) => {
+    const text = l.description;
+    const dest = /ludesch/i.test(text) ? 'ludesch' : /elsbethen|salzburg|fuschl/i.test(text) ? 'elsbethen' : '';
+    const real = l.start && l.end ? duration(l) : null;
+    const suggest = dest === 'elsbethen' ? 1 : dest === 'ludesch' && real ? Math.round(real * 0.5 * 4) / 4 : null;
+    return { l, i, dest, real, suggest };
+  });
+}
+// the Red Bull ticket to put travel on: the trip's own if it is Red Bull, else the day's main Red Bull ticket
+function travelTicket(d, l) {
+  if (l.ticket && isRb(l.project)) return { ticket: l.ticket, project: l.project };
+  const by = new Map();
+  for (const x of d.lines) if (!x.skip && x.ticket && isRb(x.project) && x.activity !== 'travel') by.set(x.ticket, { ticket: x.ticket, project: x.project, h: (by.get(x.ticket)?.h ?? 0) + hours(x) });
+  const top = [...by.values()].sort((a, b) => b.h - a.h)[0];
+  if (top) return top;
+  const recent = catalog.find((r) => isRb(r[0]));
+  return recent ? { ticket: recent[1], project: recent[0] } : null;
+}
+function travelHtml(d, editable) {
+  const trips = tripsOf(d);
+  if (!trips.length) return '';
+  const work = d.lines.filter((l) => !l.skip && l.ticket && isRb(l.project) && l.activity !== 'travel' && !TRIP.test(l.description || '')).reduce((s, l) => s + hours(l), 0);
+  const travel = trips.reduce((s, t) => s + (t.suggest ?? 0), 0);
+  let html = `<section class="travel"><div class="travel-head">🚆 ${T('Día de viaje a Red Bull', 'Red Bull travel day')}</div>`;
+  for (const t of trips) {
+    const tk = travelTicket(d, t.l);
+    const place = t.dest === 'ludesch' ? 'Ludesch' : 'Elsbethen';
+    const done = t.l.activity === 'travel' && typeof t.l.hours === 'number' && Math.abs(t.l.hours - (t.suggest ?? -1)) < 0.01 && tk && t.l.ticket === tk.ticket && t.l.place === place;
+    const what = t.dest === 'elsbethen'
+      ? T('Elsbethen: se reserva <b>1 h por trayecto</b>, dure lo que dure.', 'Elsbethen: book <b>1 h per trip</b>, however long it took.')
+      : t.dest === 'ludesch'
+        ? T(`Ludesch: <b>50 %</b> del viaje${t.real ? ` (${num(t.real)} h en el calendario)` : ''}, solo de la parte que <b>no</b> trabajaste en el tren. Si trabajaste, reserva esas horas como chargeable y el 50 % del resto como viaje.`,
+            `Ludesch: <b>50 %</b> of the trip${t.real ? ` (${num(t.real)} h in the calendar)` : ''}, only of the part you did <b>not</b> work on the train. Hours you worked go in as chargeable, 50 % of the rest as travel.`)
+        : T('No sé si es Elsbethen (1 h por trayecto) o Ludesch (50 % del viaje no trabajado): toca el viaje para elegir las horas.', "I can't tell if it's Elsbethen (1 h per trip) or Ludesch (50 % of the unworked trip): tap the trip to set the hours.");
+    html += `<div class="trip"><div class="trip-name">${esc(t.l.description)}${t.l.start ? ` · ${t.l.start}–${t.l.end}` : ''}</div><div class="trip-rule">${what}</div>`;
+    if (t.suggest != null && tk) {
+      html += `<div class="trip-do"><span>${T('Sugerencia', 'Suggestion')}: <b>${num(t.suggest)} h</b> · Travel Time (Red Bull) · <b>${esc(tk.ticket)}</b></span>`
+        + (done ? `<span class="ok">✓ ${T('aplicado', 'applied')}</span>` : editable ? `<button class="btn quiet sm" data-trip="${d.date}|${t.i}|${t.suggest}|${esc(tk.ticket)}|${esc(tk.project)}|${t.real ?? ''}|${place}">${T('Aplicar', 'Apply')}</button>` : '')
+        + '</div>';
+    }
+    html += '</div>';
+  }
+  if (travel) {
+    const where = trips.some((t) => t.dest === 'ludesch') ? 'Ludesch' : 'Elsbethen';
+    html += `<div class="trip-sum">${T('En CPM', 'In CPM')}: <b>${num(work)} h</b> chargeable + <b>${num(travel)} h</b> Travel Time (Red Bull), ${T('con Einsatzort', 'with Einsatzort')} <b>${where}</b>.<br>${T('En el sistema de RB (Workfront)', 'In the RB system (Workfront)')}: <b>${num(work + travel)} h ${T('como ONSITE', 'as ONSITE')}</b>${T(' (trabajo + viaje).', ' (work + travel).')}</div>`;
+  }
+  html += `<div class="trip-src">${T('Según el email “Korrektes Buchen der Stunden bei RB” (Michaela Matejková, 17.03.2026).', 'Per the email “Korrektes Buchen der Stunden bei RB” (Michaela Matejková, 17.03.2026).')}</div></section>`;
+  return html;
+}
+
 function meetingHtml(d, l, i, editable) {
   const kind = l.skip ? 'off' : !l.ticket ? 'none' : l.tentative ? 'unsure' : 'ok';
   const edited = typeof l.hours === 'number';
   const tags = l.skip ? `<span class="tag">${T('No se reserva', 'Not booked')}</span>`
-    : l.ticket ? `<span class="tag">${esc(l.ticket)}</span><span class="proj">${esc(l.project)}${l.chargeable === false ? T(' · no fact.', ' · non-bill.') : ''}</span>`
+    : l.ticket ? `<span class="tag">${esc(l.ticket)}</span>${l.activity === 'travel' ? `<span class="tag trav">🚆 ${isRb(l.project) ? T('viaje RB', 'RB travel') : T('viaje externo', 'external travel')}</span>` : ''}<span class="proj">${esc(l.project)}${l.chargeable === false && l.activity !== 'travel' ? T(' · no fact.', ' · non-bill.') : ''}</span>`
     : `<span class="tag red">${T('Sin ticket', 'No ticket')}</span><span class="proj">${T('toca para asignar', 'tap to assign')}</span>`;
   // a div, not a button: the card holds its own ✕ / ↺ button
   const attrs = editable ? `data-line="${d.date}|${i}" role="button" tabindex="0"` : '';
@@ -552,6 +630,7 @@ function render() {
     const live = d.lines.filter((l) => !l.skip && !l.manual);
     const overlaps = live.filter((l, i) => live.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
     if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${T(`${overlaps} reuniones se solapan y sus horas se suman. Toca una para bajarle las horas o excluirla.`, `${overlaps} meetings overlap and their hours add up. Tap one to lower its hours or leave it out.`)}</span></div>`;
+    html += travelHtml(d, editable);
     if (saving[d.date]) html += `<div class="banner blue"><span>⏳</span><span>${T('Guardando tus cambios en la VM…', 'Saving your changes on the VM…')}</span></div>`;
 
     if (d.lines.length) {
@@ -778,6 +857,10 @@ function openEditor(date, i) {
         ${manual ? '' : `<button class="btn quiet" id="reset">${T('Duración', 'Duration')}</button>`}</div>
       <div class="switches">
         <label class="switch">${T('Facturable', 'Billable')}<input type="checkbox" id="charge"></label>
+        <label class="switch">🚆 ${T('Tiempo de viaje', 'Travel time')}<input type="checkbox" id="travel"></label>
+        <p class="hint trav-note" id="travNote"></p>
+        <label class="switch field" id="travRow">${T('Reisezeit (horas reales de viaje)', 'Reisezeit (real travel hours)')}<input type="number" id="travH" min="0" max="24" step="0.25" inputmode="decimal"></label>
+        <label class="switch field">Einsatzort<input type="text" id="place" placeholder="concircle office" autocomplete="off"></label>
         ${adding ? '' : `<label class="switch">${T('No reservar esta entrada', "Don't book this entry")}<input type="checkbox" id="skipLine"></label>`}
       </div>
     </div>
@@ -790,6 +873,38 @@ function openEditor(date, i) {
   hrs.value = draft.hours ?? round2(duration(l));
   charge.checked = draft.chargeable;
   if (skipLine) skipLine.checked = !!l.skip;
+  const travelBox = $$('#travel');
+  travelBox.checked = l.activity === 'travel';
+  const travNote = $$('#travNote'), travRow = $$('#travRow'), travH = $$('#travH'), placeIn = $$('#place');
+  travH.value = l.travelHours ?? (l.start && l.end ? round2(duration(l)) : '');
+  placeIn.value = l.place || '';
+  // which CPM activity a travel line becomes depends on the project
+  // Red Bull travel, per the email: the rule depends on where the trip goes
+  const rbTravelNote = () => {
+    const text = `${l.description || ''} ${desc?.value || ''} ${placeIn.value || ''}`;
+    const real = l.start && l.end ? duration(l) : null;
+    const dest = /ludesch/i.test(text) ? 'ludesch' : /elsbethen|salzburg|fuschl/i.test(text) ? 'elsbethen' : '';
+    const sug = dest === 'elsbethen' ? 1 : dest === 'ludesch' && real ? Math.round(real * 0.5 * 4) / 4 : null;
+    const use = sug != null && Number(hrs.value) !== sug ? ` <a href="#" data-usehrs="${sug}">${T(`usar ${num(sug)} h`, `use ${num(sug)} h`)}</a>` : '';
+    const head = T('Red Bull (según el email): se reserva como <b>Travel Time (Red Bull)</b>.', 'Red Bull (per the email): booked as <b>Travel Time (Red Bull)</b>.');
+    if (dest === 'elsbethen') return `${head} ${T('Elsbethen: <b>1 h por trayecto</b>, dure lo que dure.', 'Elsbethen: <b>1 h per trip</b>, however long it took.')}${use}`;
+    if (dest === 'ludesch') return `${head} ${T('Ludesch: <b>50 %</b> del viaje que no trabajaste', 'Ludesch: <b>50 %</b> of the trip you did not work')}${real ? ` (${num(real)} h → ${num(sug)} h)` : ''}. ${T('Si trabajaste en el tren, réstalo antes.', 'If you worked on the train, take that off first.')}${use}`;
+    return `${head} ${T('Elsbethen: 1 h por trayecto · Ludesch: 50 % del viaje no trabajado. Escribe el destino en Einsatzort para que te sugiera las horas.', 'Elsbethen: 1 h per trip · Ludesch: 50 % of the unworked trip. Type the destination in Einsatzort to get a suggestion.')}`;
+  };
+  travNote.addEventListener('click', (e) => {
+    const u = e.target.closest('[data-usehrs]'); if (!u) return;
+    e.preventDefault(); hrs.value = u.dataset.usehrs; draft.hours = Number(u.dataset.usehrs); drawTravNote();
+  });
+  placeIn.addEventListener('input', () => drawTravNote());
+  const drawTravNote = () => {
+    travNote.hidden = !travelBox.checked; travRow.hidden = !travelBox.checked || !draft.project || isRb(draft.project);
+    travNote.innerHTML = !draft.project ? T('Elige un ticket para saber cómo se reserva.', 'Pick a ticket to see how it is booked.')
+      : isRb(draft.project) ? rbTravelNote()
+      : T('Otros proyectos: se reserva <b>Chargeable con 0 h</b> y las horas reales van en <b>Reisezeit</b>.', 'Other projects: booked as <b>Chargeable with 0 h</b>, the real hours in <b>Reisezeit</b>.');
+    // other projects: the booked hours are 0, the travel is in Reisezeit
+    if (travelBox.checked && draft.project && !isRb(draft.project) && Number(hrs.value) !== 0) { hrs.value = 0; draft.hours = 0; }
+  };
+  travelBox.addEventListener('change', drawTravNote);
   if (desc) desc.value = draft.description;
   proj.value = pid ? String(pid) : '';
   const text = () => (desc ? desc.value : l.description) || '';
@@ -848,6 +963,7 @@ function openEditor(date, i) {
 
   let shownProjects = projects.length;
   function draw() {
+    drawTravNote?.();
     if (shownProjects !== projects.length) {
       shownProjects = projects.length;
       proj.innerHTML = projectOptions();
@@ -948,9 +1064,11 @@ function openEditor(date, i) {
     if (adding) {
       const h = Number(hrs.value);
       if (!draft.ticket) return toast(T('Elige un ticket.', 'Pick a ticket.'));
-      if (!(h > 0 && h <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
+      const th = travelBox.checked && !isRb(draft.project) ? Number(travH.value) || 0 : 0;
+      if (!(h >= 0 && h <= 24) || (h === 0 && !(th > 0))) return toast(T('Horas entre 0 y 24 (o 0 con Reisezeit).', 'Hours between 0 and 24 (or 0 with Reisezeit).'));
       close();
-      return addLine(date, { description: (desc?.value || '').trim(), project: draft.project, ticket: draft.ticket, chargeable: charge.checked, hours: round2(h) });
+      return addLine(date, { description: (desc?.value || '').trim(), project: draft.project, ticket: draft.ticket, chargeable: charge.checked, hours: round2(h),
+        ...(travelBox.checked ? { activity: 'travel', ...(th > 0 ? { travelHours: round2(th) } : {}) } : {}), ...(placeIn.value.trim() ? { place: placeIn.value.trim() } : {}) });
     }
     const change = { i };
     if (draft.ticket !== (l.ticket || '') || draft.project !== (l.project || '').trim()) { change.ticket = draft.ticket; change.project = draft.project; }
@@ -963,7 +1081,11 @@ function openEditor(date, i) {
       if (h !== (typeof l.hours === 'number' ? l.hours : null)) change.hours = h;
     }
     if (skipLine && skipLine.checked !== !!l.skip) change.skip = skipLine.checked;
-    if (change.hours != null && !(change.hours > 0 && change.hours <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
+    if (travelBox.checked !== (l.activity === 'travel')) change.activity = travelBox.checked ? 'travel' : null;
+    const th = travelBox.checked && !isRb(draft.project) ? Number(travH.value) || null : null;
+    if (th !== (l.travelHours ?? null)) change.travelHours = th;
+    if (placeIn.value.trim() !== (l.place || '')) change.place = placeIn.value.trim() || null;
+    if (change.hours != null && !(change.hours >= 0 && change.hours <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
     close();
     if (Object.keys(change).length === 1) return;
     applyChange(date, change);
@@ -987,18 +1109,25 @@ function addLine(date, a) {
 
 // Shows a change at once and sends it to the VM, whose republished draft replaces
 // this within seconds. Re-reads the day: a snapshot may have replaced it meanwhile.
-function applyChange(date, change) {
-  const day = days[date], cur = day?.lines[change.i]; if (!cur) return;
+function applyChange(date, change) { applyChanges(date, [change]); }
+function applyChanges(date, changes) {
+  const day = days[date]; if (!day) return;
+  for (const change of changes) {
+  const cur = day.lines[change.i]; if (!cur) continue;
   if (change.ticket !== undefined) Object.assign(cur, { ticket: change.ticket, project: change.project, tentative: false });
   if (change.chargeable !== undefined) cur.chargeable = change.chargeable;
   if (change.hours !== undefined) { if (change.hours === null) delete cur.hours; else cur.hours = change.hours; }
   if (change.skip !== undefined) cur.skip = change.skip;
   if (change.description !== undefined) cur.description = change.description;
+  if (change.activity !== undefined) { if (change.activity) cur.activity = change.activity; else delete cur.activity; }
+  if (change.travelHours !== undefined) { if (change.travelHours) cur.travelHours = change.travelHours; else delete cur.travelHours; }
+  if (change.place !== undefined) { if (change.place) cur.place = change.place; else delete cur.place; }
+  }
   day.entries = toEntries(day.lines);
   saving[date] = true;
   store.set('days', JSON.stringify(days));
   render();
-  send(`edit ${date} ${day.token} ${JSON.stringify([change])}`);
+  send(`edit ${date} ${day.token} ${JSON.stringify(changes)}`);
 }
 
 // A styled yes/no pop-up; resolves true on the confirm button.
@@ -1050,6 +1179,15 @@ $('#main').addEventListener('click', async (e) => {
     });
     if (yes) applyChange(date, { i: Number(i), skip: true });
     return;
+  }
+  const trip = e.target.closest('[data-trip]');
+  if (trip) {
+    const [date, i, h, ticket, project, real, place] = trip.dataset.trip.split('|');
+    const d = days[date]; if (!d) return;
+    // the trip itself, plus Einsatzort on the day's Red Bull work (you were onsite)
+    const changes = [{ i: Number(i), ticket, project, hours: Number(h), activity: 'travel', travelHours: null, place }];
+    d.lines.forEach((l, k) => { if (k !== Number(i) && !l.skip && isRb(l.project) && l.place !== place) changes.push({ i: k, place }); });
+    return applyChanges(date, changes);
   }
   const add = e.target.closest('[data-add]');
   if (add) return openEditor(add.dataset.add, null);
