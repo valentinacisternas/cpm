@@ -247,6 +247,32 @@
   .setup { background: var(--card); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
   .setup input { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font-size: 15px; margin: 10px 0; }
   .note { font-size: 13px; color: var(--muted); margin: 10px 4px; }
+
+  /* editor: project picker, history chips, budget, add entry */
+  .sheet select, .sheet textarea { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink); font-size: 16px; font-family: inherit; }
+  .sheet select { appearance: none; -webkit-appearance: none; padding-right: 34px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 18px) 52%, calc(100% - 13px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+  .sheet textarea { resize: vertical; min-height: 54px; }
+  .sheet select:focus, .sheet textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .picked { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink-2); }
+  .picked .none { color: var(--red); }
+  .chips { display: grid; gap: 6px; }
+  .chip { text-align: left; border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 8px 11px; font-size: 14px; box-shadow: var(--shadow);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip small { display: block; color: var(--muted); font-size: 12px; }
+  .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .chips .hint { margin: 2px 4px; }
+  .trow { display: flex; align-items: center; gap: 6px; }
+  .bud { margin-left: auto; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--card-2); color: var(--muted); white-space: nowrap; }
+  .bud.green { background: var(--green-soft); color: var(--green); } .bud.amber { background: var(--amber-soft); color: var(--amber); } .bud.red { background: var(--red-soft); color: var(--red); }
+  .mine { font-size: 11px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; }
+  .ticket small { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .hint a { color: var(--accent); }
+  .addline { display: block; width: 100%; margin-top: 8px; padding: 13px 16px; border: 1.5px dashed var(--line); border-radius: 16px; background: none;
+    color: var(--accent); font-weight: 650; text-align: left; }
+  .addline small { display: block; color: var(--muted); font-weight: 500; font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -270,7 +296,8 @@
     data  (VM → app): {kind:"day"} a drafted day and its status, {kind:"url"} the Copilot's
                       link (+ the ticket-search key), {kind:"catalog"} your recent tickets
     reply (app → VM): "approve|skip|reopen <date> <token>", "edit <date> <token> [changes]",
-                      "draft <date>", "refresh"
+                      "add <date> <token|-> {entry}", "draft <date>", "refresh", "projects",
+                      "tickets <projectId>", "hint <id> <text>" (best tickets for a text, from your history)
   Ticket search goes straight to the Copilot server on the VM (through its tunnel), which
   holds the CPM key. The topic names live only in this device's storage (they arrive in
   the link's #fragment, which browsers never send to the server).
@@ -300,6 +327,12 @@ let copilot = store.get('copilot') || '';
 let searchKey = store.get('searchKey') || '';
 let lastAt = store.get('lastAt') || '';
 let workdays = parse('workdays', {}); // date -> the timesheet's start/end/pause/real for that day
+let projects = parse('projects', []);         // [id, name, used this year 1/0], recent first
+let ticketsByProject = parse('tickets', {});  // project id -> {rows: [ticket, subject, estimated, spent, mine], fetched}
+const ticketAsked = {};                       // project id -> when the app asked for its tickets
+const hints = {};                             // hint id -> [[project, ticket, subject, chargeable, score]]
+const parts = {};                             // long lists arrive in parts; joined here
+let editorHook = null;                        // redraws the open editor when its data arrives
 const pending = {};   // date -> 'approve' | 'skip' | 'reopen' sent, waiting for the VM
 const saving = {};    // dates with an edit the VM hasn't confirmed yet; Reservar waits for it
 const requested = {}; // date -> when the app asked the VM to draft/show it
@@ -307,7 +340,8 @@ let selected = '';    // the day on screen; otherwise the newest draft
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const mins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-const duration = (l) => Math.max(0, (mins(l.end) - mins(l.start)) / 60);
+// an entry added by hand has no start/end: its length is its hours
+const duration = (l) => (l.start && l.end ? Math.max(0, (mins(l.end) - mins(l.start)) / 60) : (typeof l.hours === 'number' ? l.hours : 0));
 const hours = (l) => (typeof l.hours === 'number' ? l.hours : duration(l));
 const round2 = (h) => Math.round(h * 100) / 100;
 const num = (h) => T(String(round2(h)).replace('.', ','), String(round2(h)));
@@ -438,7 +472,8 @@ function heroHtml(d) {
   const missing = live.filter((l) => !l.ticket).length;
   const total = totalOf(d);
   const ne = d.entries.length, nl = d.lines.length;
-  const sub = d.status === 'already' ? T('ya cargadas en CPM', 'already in CPM')
+  const sub = d.topUp ? T(`se suma a ${num(d.inCpm.reduce((s, e) => s + e.hours, 0))} h ya en CPM`, `on top of ${num(d.inCpm.reduce((s, e) => s + e.hours, 0))} h already in CPM`)
+    : d.status === 'already' ? T('ya cargadas en CPM', 'already in CPM')
     : d.status === 'empty' ? T('sin reuniones de trabajo en el calendario', 'no work meetings in the calendar')
     : T(`${ne} entrada${ne === 1 ? '' : 's'} · ${nl} reunion${nl === 1 ? '' : 'es'}`, `${ne} entr${ne === 1 ? 'y' : 'ies'} · ${nl} meeting${nl === 1 ? '' : 's'}`);
   let html = `<section class="hero ${cls === 'pending' ? '' : cls}">
@@ -468,8 +503,8 @@ function meetingHtml(d, l, i, editable) {
     : l.skip ? `<button class="rm undo" data-restore="${d.date}|${i}" aria-label="${T('Volver a incluir', 'Include again')}">↺</button>`
     : `<button class="rm" data-remove="${d.date}|${i}" aria-label="${T('Quitar de la reserva', 'Remove from booking')}">✕</button>`;
   return `<div class="mt ${kind}${editable ? ' has-rm' : ' static'}" ${attrs}>
-    <div class="t"><b>${l.start}</b><span>${l.end}</span></div>
-    <div class="title">${esc(l.description)}</div>
+    <div class="t">${l.manual ? `<b>＋</b><span>${T('a mano', 'manual')}</span>` : `<b>${l.start}</b><span>${l.end}</span>`}</div>
+    <div class="title">${esc(l.description) || `<span style="color:var(--muted)">${T('(sin comentario)', '(no comment)')}</span>`}</div>
     <div class="h${edited ? ' edited' : ''}">${l.skip ? '–' : num(hours(l))}<small>${edited ? T('editado', 'edited') : 'h'}</small></div>
     <div class="tags">${tags}</div>
     ${remove}
@@ -513,7 +548,7 @@ function render() {
   } else {
     const editable = d.status === 'pending';
     html += heroHtml(d);
-    const live = d.lines.filter((l) => !l.skip);
+    const live = d.lines.filter((l) => !l.skip && !l.manual);
     const overlaps = live.filter((l, i) => live.some((o, j) => j !== i && mins(o.start) < mins(l.end) && mins(o.end) > mins(l.start))).length;
     if (editable && overlaps) html += `<div class="banner amber"><span>⚠️</span><span>${T(`${overlaps} reuniones se solapan y sus horas se suman. Toca una para bajarle las horas o excluirla.`, `${overlaps} meetings overlap and their hours add up. Tap one to lower its hours or leave it out.`)}</span></div>`;
     if (saving[d.date]) html += `<div class="banner blue"><span>⏳</span><span>${T('Guardando tus cambios en la VM…', 'Saving your changes on the VM…')}</span></div>`;
@@ -521,6 +556,15 @@ function render() {
     if (d.lines.length) {
       html += `<div class="section"><h2>${T('Reuniones', 'Meetings')}</h2><span>${editable ? T('toca para editar', 'tap to edit') : ''}</span></div><div class="list">`;
       d.lines.forEach((l, i) => { html += meetingHtml(d, l, i, editable); });
+      html += '</div>';
+    }
+    // add hours by hand: to a day under review, or on top of a day with no meetings / already in CPM
+    if (editable || ['empty', 'already', 'booked', 'partial'].includes(d.status)) {
+      html += `<button class="addline" data-add="${d.date}">＋ ${T('Agregar entrada', 'Add entry')}<small>${editable ? T('horas que no están en el calendario', 'hours not in the calendar') : T('se suma a lo que ya está en CPM', 'on top of what is already in CPM')}</small></button>`;
+    }
+    if (d.topUp && d.inCpm?.length) {
+      html += `<div class="section"><h2>${T('Ya en CPM', 'Already in CPM')}</h2><span>${num(d.inCpm.reduce((s, e) => s + e.hours, 0))} h</span></div><div class="rows">`;
+      for (const e of d.inCpm) html += `<div><span>${esc(e.ticket)} · ${esc(e.project)}</span><b>${num(e.hours)} h</b></div>`;
       html += '</div>';
     }
     if (d.status === 'already' && d.entries.length) {
@@ -662,119 +706,280 @@ function renderSetup(main) {
   };
 }
 
-/* ---------- editing a meeting ---------- */
+/* ---------- editing a meeting / adding an entry ---------- */
+
+// same word splitting as the VM's matcher (lib/suggest.js), to rank a project's tickets
+const STOP = new Set(['the', 'and', 'with', 'for', 'call', 'meeting', 'meet', 'weekly', 'daily', 'sync', 'catch', 'up', 'review', 'session',
+  'workshop', 'std', 'standup', 'de', 'la', 'el', 'con', 'reunion', 'llamada', 'termin', 'besprechung', 'want', 'production', 'processor']);
+const words = (s) => [...new Set(String(s ?? '').toLowerCase().split(/[^a-z0-9äöüáéíóúñ]+/i).filter((t) => t.length > 2 && !STOP.has(t)))];
+const projectIdOf = (name) => projects.find((p) => p[1].trim() === String(name ?? '').trim())?.[0] ?? '';
+const projectName = (id) => projects.find((p) => String(p[0]) === String(id))?.[1] ?? '';
+
+// budget left on a ticket row [ticket, subject, estimated, spent, mine]
+function budgetTag(r, want = 0) {
+  if (r[2] == null || r[2] === 0) return `<span class="bud">${T('sin estimado', 'no estimate')}</span>`;
+  const left = round2(r[2] - r[3]);
+  const cls = left <= 0 ? 'red' : left < Math.max(want, 2) ? 'amber' : 'green';
+  return `<span class="bud ${cls}">${left <= 0 ? T(`sin budget (${num(left)} h)`, `no budget (${num(left)} h)`) : T(`quedan ${num(left)} h`, `${num(left)} h left`)}</span>`;
+}
+
+function askTickets(id, force = false) {
+  if (!id) return;
+  const t = ticketsByProject[id];
+  if (!force && t && Date.now() - t.fetched < 15 * 60e3) return;
+  if (ticketAsked[id] && Date.now() - ticketAsked[id] < 20000) return;
+  ticketAsked[id] = Date.now();
+  send(`tickets ${id}`);
+}
 
 function openEditor(date, i) {
-  const d = days[date], l = d?.lines[i]; if (!l) return;
-  const draft = { project: l.project || '', ticket: l.ticket || '', chargeable: l.chargeable !== false,
-    hours: typeof l.hours === 'number' ? l.hours : null };
+  const d = days[date];
+  const adding = i == null;
+  const l = adding ? { start: '', end: '', manual: true, description: '', project: '', ticket: '', chargeable: true, hours: 1 } : d?.lines[i];
+  if (!l) return;
+  const manual = !!l.manual;
+  const draft = { project: (l.project || '').trim(), ticket: l.ticket || '', chargeable: l.chargeable !== false,
+    hours: typeof l.hours === 'number' ? l.hours : null, description: l.description || '' };
+  if (!projects.length) send('projects');
+  let pid = projectIdOf(draft.project);
+  const opt = (p) => `<option value="${p[0]}">${esc(p[1])}</option>`;
+  // the options are rebuilt when your project list arrives while the editor is open
+  const projectOptions = () => {
+    const recent = projects.filter((p) => p[2]), other = projects.filter((p) => !p[2]);
+    return `<option value="">${T('— Tickets recientes de todos los proyectos —', '— Recent tickets, all projects —')}</option>
+      ${recent.length ? `<optgroup label="${T('Usados este año', 'Used this year')}">${recent.map(opt).join('')}</optgroup>` : ''}
+      ${other.length ? `<optgroup label="${T('Otros proyectos', 'Other projects')}">${other.map(opt).join('')}</optgroup>` : ''}
+      ${projects.length ? '' : `<option value="" disabled>${T('Cargando tus proyectos…', 'Loading your projects…')}</option>`}`;
+  };
+
   const bg = document.createElement('div');
   bg.className = 'sheet-bg';
-  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="${T('Editar reunión', 'Edit meeting')}">
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="${adding ? T('Nueva entrada', 'New entry') : T('Editar reunión', 'Edit meeting')}">
     <div class="grab"></div>
     <div class="sheet-body">
-      <h3>${esc(l.description)}</h3>
-      <div class="sub">${l.start}–${l.end} · ${num(duration(l))} h ${T('en el calendario', 'in the calendar')}</div>
-      <label for="q">Ticket</label>
-      <div class="search"><input type="search" id="q" placeholder="${T('Número, proyecto o asunto', 'Number, project or subject')}" autocomplete="off" enterkeyhint="search"></div>
+      <h3>${adding ? T('Nueva entrada', 'New entry') : esc(l.description) || T('Entrada', 'Entry')}</h3>
+      <div class="sub">${manual ? (adding ? T(`Se suma a ${dayLabel(date).toLowerCase()}`, `Added to ${dayLabel(date)}`) + (d && d.status !== 'pending' ? T(' · además de lo que ya está en CPM', ' · on top of what is already in CPM') : '') : T('Entrada agregada a mano', 'Entry added by hand'))
+        : `${l.start}–${l.end} · ${num(duration(l))} h ${T('en el calendario', 'in the calendar')}`}</div>
+      ${manual ? `<label for="desc">${T('Comentario', 'Comment')}</label>
+        <textarea id="desc" rows="2" placeholder="${T('Qué hiciste, p. ej. “Scanner logic master pack”', 'What you did, e.g. “Scanner logic master pack”')}"></textarea>` : ''}
+      <label>${T('Según tu historial', 'From your history')}</label>
+      <div class="chips" id="hints"></div>
+      <label for="proj">${T('Proyecto', 'Project')}</label>
+      <select id="proj">${projectOptions()}</select>
+      <label for="q">Ticket <span class="picked" id="picked"></span></label>
+      <div class="search"><input type="search" id="q" placeholder="${T('Filtrar por número o palabra', 'Filter by number or word')}" autocomplete="off" enterkeyhint="search"></div>
       <div class="tickets" id="tickets"></div>
       <label for="hrs">${T('Horas a reservar', 'Hours to book')}</label>
       <div class="hrs"><button class="step" data-step="-0.25" aria-label="${T('Menos', 'Less')}">−</button>
         <input type="number" id="hrs" min="0" max="24" step="0.25" inputmode="decimal">
         <button class="step" data-step="0.25" aria-label="${T('Más', 'More')}">+</button>
-        <button class="btn quiet" id="reset">${T('Duración', 'Duration')}</button></div>
+        ${manual ? '' : `<button class="btn quiet" id="reset">${T('Duración', 'Duration')}</button>`}</div>
       <div class="switches">
         <label class="switch">${T('Facturable', 'Billable')}<input type="checkbox" id="charge"></label>
-        <label class="switch">${T('No reservar esta reunión', "Don't book this meeting")}<input type="checkbox" id="skipLine"></label>
+        ${adding ? '' : `<label class="switch">${T('No reservar esta entrada', "Don't book this entry")}<input type="checkbox" id="skipLine"></label>`}
       </div>
     </div>
-    <div class="sheet-foot"><button class="btn quiet" id="cancel">${T('Cancelar', 'Cancel')}</button><button class="btn primary" id="ok">${T('Guardar', 'Save')}</button></div>
+    <div class="sheet-foot"><button class="btn quiet" id="cancel">${T('Cancelar', 'Cancel')}</button><button class="btn primary" id="ok">${adding ? T('Agregar', 'Add') : T('Guardar', 'Save')}</button></div>
   </div>`;
   document.body.appendChild(bg);
-  const q = bg.querySelector('#q'), list = bg.querySelector('#tickets');
-  const hrs = bg.querySelector('#hrs'), charge = bg.querySelector('#charge'), skipLine = bg.querySelector('#skipLine');
+  const $$ = (s) => bg.querySelector(s);
+  const q = $$('#q'), list = $$('#tickets'), proj = $$('#proj'), hintsEl = $$('#hints'), picked = $$('#picked');
+  const hrs = $$('#hrs'), charge = $$('#charge'), skipLine = $$('#skipLine'), desc = $$('#desc');
   hrs.value = draft.hours ?? round2(duration(l));
-  charge.checked = draft.chargeable; skipLine.checked = !!l.skip;
+  charge.checked = draft.chargeable;
+  if (skipLine) skipLine.checked = !!l.skip;
+  if (desc) desc.value = draft.description;
+  proj.value = pid ? String(pid) : '';
+  const text = () => (desc ? desc.value : l.description) || '';
 
-  // rows: [project, ticket, subject, chargeable 1/0 or null when unknown]
-  // the meeting's current ticket first, then your recent ones
-  const current = catalog.find((r) => r[1] === draft.ticket) ?? (draft.ticket ? [draft.project, draft.ticket, '', draft.chargeable ? 1 : 0] : null);
-  const options = current ? [current, ...catalog.filter((r) => r !== current)] : [...catalog];
+  function choose(project, ticket, chargeable) {
+    draft.project = String(project ?? '').trim(); draft.ticket = ticket;
+    const known = catalog.find((x) => x[1] === ticket);
+    if (chargeable != null) draft.chargeable = !!chargeable; else if (known) draft.chargeable = !!known[3];
+    charge.checked = draft.chargeable;
+    const id = projectIdOf(draft.project);
+    if (id && String(id) !== proj.value) { pid = id; proj.value = String(id); askTickets(id); }
+    q.value = ''; q.blur(); draw();
+  }
+
+  /* history suggestions, asked to the approver ("hint <id> <text>") */
+  let hintId = '', hintSent = 0, hintTimer;
+  function askHint() {
+    const t = text().trim();
+    if (!t) { hintId = ''; return drawHints(); }
+    hintId = Math.random().toString(36).slice(2, 10); hintSent = Date.now();
+    send(`hint ${hintId} ${t.replace(/\s+/g, ' ').slice(0, 280)}`);
+    drawHints(); setTimeout(drawHints, 20000);
+  }
+  function drawHints() {
+    if (!hintId) { hintsEl.innerHTML = `<p class="hint">${T('Escribe un comentario y te sugiero dónde va.', "Type a comment and I'll suggest where it goes.")}</p>`; return; }
+    const rows = hints[hintId];
+    if (!rows) {
+      hintsEl.innerHTML = `<p class="hint">${Date.now() - hintSent > 19000 ? T('Sin respuesta (¿está encendida la Mac o la VM?).', 'No answer (is the Mac or the VM on?).') : T('Buscando en tu historial…', 'Looking through your history…')}</p>`;
+      return;
+    }
+    hintsEl.innerHTML = rows.length
+      ? rows.slice(0, 4).map((r) => `<button class="chip" data-hp="${esc(r[0])}" data-ht="${esc(r[1])}" data-hc="${r[3]}" aria-pressed="${r[1] === draft.ticket}">
+          <b>${esc(r[1])}</b> ${esc(r[2] || '')}<small>${esc(r[0].trim())}</small></button>`).join('')
+      : `<p class="hint">${T('Nada parecido en tu historial.', 'Nothing similar in your history.')}</p>`;
+  }
+  hintsEl.addEventListener('click', (e) => {
+    const c = e.target.closest('.chip'); if (!c) return;
+    choose(c.dataset.hp, c.dataset.ht, c.dataset.hc === '1');
+  });
+
+  /* the ticket list: the chosen project's open tickets (with budget), or your recent ones */
   const SEARCHING = T('Buscando en CPM…', 'Searching CPM…');
   let remote = [], remoteState = '', searchCtl, timer;
-  const row = (r) => `<button class="ticket" data-t="${esc(r[1])}" aria-pressed="${r[1] === draft.ticket}">
-      <b>${esc(r[1])}</b> · ${esc(r[0])}<small>${esc(r[2] || ' ')}</small></button>`;
-  function drawList() {
-    const text = q.value.trim(), words = text.toLowerCase().replace(/#/g, '').split(/\s+/).filter(Boolean);
-    const local = options.filter((r) => words.every((w) => r.join(' ').toLowerCase().includes(w)));
+  const row = (r, extra = '') => `<button class="ticket" data-t="${esc(r[1])}" data-p="${esc(r[0])}" aria-pressed="${r[1] === draft.ticket}">
+      <b>${esc(r[1])}</b> · ${esc(r[0])}${extra}<small>${esc(r[2] || ' ')}</small></button>`;
+  const prow = (r) => `<button class="ticket" data-t="${esc(r[0])}" data-p="${esc(projectName(pid))}" aria-pressed="${r[0] === draft.ticket}">
+      <span class="trow"><b>${esc(r[0])}</b>${r[4] ? `<span class="mine">${T('tuyo', 'yours')}</span>` : ''}${budgetTag(r, Number(hrs.value) || 0)}</span><small>${esc(r[1])}</small></button>`;
+
+  function drawPicked() {
+    if (!draft.ticket) { picked.innerHTML = `<span class="none">${T('sin elegir', 'none chosen')}</span>`; return; }
+    const pr = (ticketsByProject[projectIdOf(draft.project)]?.rows ?? []).find((r) => r[0] === draft.ticket);
+    const c = catalog.find((r) => r[1] === draft.ticket);
+    picked.innerHTML = `· <b>${esc(draft.ticket)}</b> ${esc((pr?.[1] ?? c?.[2] ?? '').slice(0, 40))}`;
+  }
+
+  let shownProjects = projects.length;
+  function draw() {
+    if (shownProjects !== projects.length) {
+      shownProjects = projects.length;
+      proj.innerHTML = projectOptions();
+      if (!pid) pid = projectIdOf(draft.project);
+      proj.value = pid ? String(pid) : '';
+      if (pid) askTickets(pid);
+    }
+    drawPicked(); drawHints();
+    const qt = q.value.trim(), qw = qt.toLowerCase().replace(/#/g, '').split(/\s+/).filter(Boolean);
+    let html = '';
+    if (pid) {
+      const t = ticketsByProject[pid];
+      if (!t) { list.innerHTML = `<p class="hint">${T('Cargando los tickets del proyecto…', "Loading the project's tickets…")}</p>`; return; }
+      let rows = t.rows;
+      if (qw.length) {
+        rows = rows.filter((r) => qw.every((w) => `${r[0]} ${r[1]}`.toLowerCase().includes(w)));
+        html += rows.length ? rows.map(prow).join('') : `<p class="hint">${T('Ningún ticket abierto coincide.', 'No open ticket matches.')}</p>`;
+      } else {
+        const mw = words(text());
+        const recent = new Set(catalog.map((c) => c[1]));
+        const scored = rows.map((r) => {
+          const sw = words(r[1]);
+          return { r, s: mw.filter((w) => sw.some((x) => x.startsWith(w) || w.startsWith(x))).length };
+        });
+        const similar = scored.filter((x) => x.s > 0).sort((a, b) => b.s - a.s || b.r[4] - a.r[4]).slice(0, 5).map((x) => x.r);
+        const cur = rows.find((r) => r[0] === draft.ticket);
+        const top = [...new Set([cur, ...similar].filter(Boolean))];
+        const rest = rows.filter((r) => !top.includes(r))
+          .sort((a, b) => b[4] - a[4] || (recent.has(b[0]) - recent.has(a[0])) || Number(b[0].slice(1)) - Number(a[0].slice(1)));
+        if (top.length) html += `<div class="group">${similar.length ? T('Parecidos a esta entrada', 'Similar to this entry') : T('Elegido', 'Chosen')}</div>` + top.map(prow).join('');
+        html += `<div class="group">${T(`Abiertos en el proyecto (${rest.length})`, `Open in the project (${rest.length})`)}</div>` + rest.map(prow).join('');
+      }
+      list.innerHTML = html + `<p class="hint">${T('Actualizado', 'Updated')} ${new Date(t.fetched).toLocaleTimeString(lang === 'en' ? 'en' : 'es', { hour: '2-digit', minute: '2-digit' })} · <a href="#" data-reload>${T('recargar', 'reload')}</a></p>`;
+      return;
+    }
+    // no project: your recent tickets, plus a CPM search when the Copilot is reachable
+    const current = catalog.find((r) => r[1] === draft.ticket) ?? (draft.ticket ? [draft.project, draft.ticket, '', draft.chargeable ? 1 : 0] : null);
+    const options = current ? [current, ...catalog.filter((r) => r !== current)] : [...catalog];
+    const local = options.filter((r) => qw.every((w) => r.join(' ').toLowerCase().includes(w)));
     const shown = new Set(local.map((r) => r[1]));
     const more = remote.filter((r) => !shown.has(r[1]));
-    const digits = text.replace(/^#/, '');
-    let html = '';
-    if (local.length) html += `<div class="group">${text ? T('Tus tickets', 'Your tickets') : T('Recientes', 'Recent')}</div>` + local.map(row).join('');
-    if (more.length) html += `<div class="group">${T('En CPM', 'In CPM')}</div>` + more.map(row).join('');
+    const digits = qt.replace(/^#/, '');
+    if (local.length) html += `<div class="group">${qt ? T('Tus tickets', 'Your tickets') : T('Recientes', 'Recent')}</div>` + local.map((r) => row(r)).join('');
+    if (more.length) html += `<div class="group">${T('En CPM', 'In CPM')}</div>` + more.map((r) => row(r)).join('');
     if (/^\d{3,7}$/.test(digits) && !shown.has('#' + digits) && !more.some((r) => r[1] === '#' + digits) && remoteState !== SEARCHING) {
-      html += `<button class="ticket" data-t="#${digits}"><b>${T('Usar', 'Use')} #${digits}</b><small>${T('No está en la lista, pero puedes usarlo igual', "Not in the list, but you can still use it")}</small></button>`;
+      html += `<button class="ticket" data-t="#${digits}" data-p=""><b>${T('Usar', 'Use')} #${digits}</b><small>${T('No está en la lista, pero puedes usarlo igual', 'Not in the list, but you can still use it')}</small></button>`;
     }
     if (remoteState) html += `<p class="hint">${remoteState}</p>`;
-    if (!html) html = `<p class="hint">${catalog.length ? T('Escribe un número de ticket o una palabra del asunto.', 'Type a ticket number or a word from the subject.') : T('Tus tickets llegan con ↻.', 'Your tickets arrive with ↻.')}</p>`;
+    html += `<p class="hint">${T('Elige un proyecto arriba para ver todos sus tickets y el budget que les queda.', 'Pick a project above to see all its tickets and their budget left.')}</p>`;
     list.innerHTML = html;
   }
-  // tickets beyond your recent ones: asked to the Copilot server on the VM, which holds the CPM key
   async function searchCpm() {
-    const text = q.value.trim(), digits = text.replace(/^#/, '');
-    searchCtl?.abort();
-    remote = [];
-    if (!(/^\d{3,7}$/.test(digits) || text.length >= 3)) { remoteState = ''; return drawList(); }
-    if (!copilot || !searchKey) { remoteState = T('La búsqueda en CPM se activa con ↻.', 'CPM search turns on with ↻.'); return drawList(); }
+    if (pid) return draw();
+    const qt = q.value.trim(), digits = qt.replace(/^#/, '');
+    searchCtl?.abort(); remote = [];
+    if (!(/^\d{3,7}$/.test(digits) || qt.length >= 3) || !copilot || !searchKey) { remoteState = ''; return draw(); }
     const ctl = searchCtl = new AbortController();
     const timeout = setTimeout(() => ctl.abort(), 15000);
-    remoteState = SEARCHING; drawList();
+    remoteState = SEARCHING; draw();
     try {
-      const r = await fetch(`${copilot}/issues?q=${encodeURIComponent(text)}`, { headers: { 'x-copilot-key': searchKey }, signal: ctl.signal });
+      const r = await fetch(`${copilot}/issues?q=${encodeURIComponent(qt)}`, { headers: { 'x-copilot-key': searchKey }, signal: ctl.signal });
       const body = await r.json();
       if (!r.ok) throw new Error(body.error || r.status);
       remote = body.issues.map((i) => [i.project, '#' + i.id, i.subject, null]);
       remoteState = remote.length ? '' : T('Nada más en CPM.', 'Nothing else in CPM.');
     } catch {
-      if (ctl !== searchCtl) return; // a newer search replaced this one
-      remoteState = T('No pude buscar en CPM (¿la VM está encendida?).', "Couldn't search CPM (is the VM on?).");
+      if (ctl !== searchCtl) return;
+      remoteState = '';
     } finally { clearTimeout(timeout); }
-    if (ctl === searchCtl) drawList();
+    if (ctl === searchCtl) draw();
   }
-  drawList();
-  q.addEventListener('input', () => { drawList(); clearTimeout(timer); timer = setTimeout(searchCpm, 300); });
+
+  editorHook = draw;
+  if (pid) askTickets(pid);
+  if (text().trim()) askHint(); else drawHints();
+  draw();
+  if (adding) setTimeout(() => desc?.focus(), 250);
+
+  proj.addEventListener('change', () => { pid = proj.value ? Number(proj.value) : ''; q.value = ''; if (pid) askTickets(pid); draw(); });
+  q.addEventListener('input', () => { draw(); clearTimeout(timer); timer = setTimeout(searchCpm, 300); });
+  desc?.addEventListener('input', () => { draft.description = desc.value; clearTimeout(hintTimer); hintTimer = setTimeout(() => { askHint(); draw(); }, 700); });
   list.addEventListener('click', (e) => {
+    if (e.target.closest('[data-reload]')) { e.preventDefault(); askTickets(pid, true); list.insertAdjacentHTML('beforeend', `<p class="hint">${T('Recargando…', 'Reloading…')}</p>`); return; }
     const t = e.target.closest('.ticket'); if (!t) return;
-    const r = [...options, ...remote].find((x) => x[1] === t.dataset.t) ?? ['', t.dataset.t, '', null];
-    draft.ticket = r[1]; draft.project = r[0];
-    // the chargeable flag you usually book this ticket with, when known
-    const known = catalog.find((x) => x[1] === r[1]);
-    if (known) { draft.chargeable = !!known[3]; charge.checked = draft.chargeable; }
-    q.blur(); drawList();
+    const r = remote.find((x) => x[1] === t.dataset.t);
+    choose(t.dataset.p || r?.[0] || draft.project, t.dataset.t);
   });
   bg.querySelectorAll('[data-step]').forEach((b) => b.onclick = () => {
     const v = Math.min(24, Math.max(0, round2((Number(hrs.value) || 0) + Number(b.dataset.step))));
-    hrs.value = v; draft.hours = v;
+    hrs.value = v; draft.hours = v; if (pid) draw();
   });
-  bg.querySelector('#reset').onclick = () => { hrs.value = round2(duration(l)); draft.hours = null; };
+  $$('#reset')?.addEventListener('click', () => { hrs.value = round2(duration(l)); draft.hours = null; });
   hrs.addEventListener('input', () => { draft.hours = hrs.value === '' ? null : Number(hrs.value); });
-  const close = () => bg.remove();
+  const close = () => { editorHook = null; bg.remove(); };
   bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
-  bg.querySelector('#cancel').onclick = close;
-  bg.querySelector('#ok').onclick = () => {
+  $$('#cancel').onclick = close;
+  $$('#ok').onclick = () => {
+    if (adding) {
+      const h = Number(hrs.value);
+      if (!draft.ticket) return toast(T('Elige un ticket.', 'Pick a ticket.'));
+      if (!(h > 0 && h <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
+      close();
+      return addLine(date, { description: (desc?.value || '').trim(), project: draft.project, ticket: draft.ticket, chargeable: charge.checked, hours: round2(h) });
+    }
     const change = { i };
-    if (draft.ticket !== (l.ticket || '') || draft.project !== (l.project || '')) { change.ticket = draft.ticket; change.project = draft.project; }
+    if (draft.ticket !== (l.ticket || '') || draft.project !== (l.project || '').trim()) { change.ticket = draft.ticket; change.project = draft.project; }
     if (charge.checked !== (l.chargeable !== false)) change.chargeable = charge.checked;
-    const h = draft.hours === null || Math.abs(draft.hours - duration(l)) < 0.001 ? null : draft.hours;
-    if (h !== (typeof l.hours === 'number' ? l.hours : null)) change.hours = h;
-    if (skipLine.checked !== !!l.skip) change.skip = skipLine.checked;
-    if (change.hours != null && !(change.hours >= 0 && change.hours <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
+    if (manual) {
+      if (draft.hours != null && draft.hours !== l.hours) change.hours = draft.hours;
+      if (desc && desc.value.trim() !== (l.description || '')) change.description = desc.value.trim();
+    } else {
+      const h = draft.hours === null || Math.abs(draft.hours - duration(l)) < 0.001 ? null : draft.hours;
+      if (h !== (typeof l.hours === 'number' ? l.hours : null)) change.hours = h;
+    }
+    if (skipLine && skipLine.checked !== !!l.skip) change.skip = skipLine.checked;
+    if (change.hours != null && !(change.hours > 0 && change.hours <= 24)) return toast(T('Horas entre 0 y 24.', 'Hours between 0 and 24.'));
     close();
     if (Object.keys(change).length === 1) return;
-
     applyChange(date, change);
   };
+}
+
+// A new entry typed in the app. On a day under review it shows at once; on a day with
+// no open draft (no meetings, or already in CPM) the VM starts a top-up for it.
+function addLine(date, a) {
+  const d = days[date];
+  const token = d?.status === 'pending' ? d.token : '-';
+  if (d?.status === 'pending') {
+    d.lines.push({ start: '', end: '', manual: true, tentative: false, ...a });
+    d.entries = toEntries(d.lines);
+    store.set('days', JSON.stringify(days));
+  }
+  saving[date] = true;
+  render();
+  send(`add ${date} ${token} ${JSON.stringify(a)}`, T('Agregando…', 'Adding…'));
 }
 
 // Shows a change at once and sends it to the VM, whose republished draft replaces
@@ -785,6 +990,7 @@ function applyChange(date, change) {
   if (change.chargeable !== undefined) cur.chargeable = change.chargeable;
   if (change.hours !== undefined) { if (change.hours === null) delete cur.hours; else cur.hours = change.hours; }
   if (change.skip !== undefined) cur.skip = change.skip;
+  if (change.description !== undefined) cur.description = change.description;
   day.entries = toEntries(day.lines);
   saving[date] = true;
   store.set('days', JSON.stringify(days));
@@ -837,11 +1043,13 @@ $('#main').addEventListener('click', async (e) => {
     if (rm.dataset.restore) return applyChange(date, { i: Number(i), skip: false });
     const yes = await confirmDialog({
       title: T('¿Quitar esta reunión?', 'Remove this meeting?'), icon: '✕', danger: true, ok: T('Quitar', 'Remove'),
-      text: `<b>${esc(l.description)}</b><br>${l.start}–${l.end}${l.ticket ? ` · ${num(hours(l))} h` : ''}<br><br>${T('No se reservará en CPM. La puedes volver a incluir con ↺.', "It won't be booked in CPM. You can include it again with ↺.")}`,
+      text: `<b>${esc(l.description)}</b><br>${l.manual ? T('Entrada a mano', 'Manual entry') : `${l.start}–${l.end}`}${l.ticket ? ` · ${num(hours(l))} h` : ''}<br><br>${T('No se reservará en CPM. La puedes volver a incluir con ↺.', "It won't be booked in CPM. You can include it again with ↺.")}`,
     });
     if (yes) applyChange(date, { i: Number(i), skip: true });
     return;
   }
+  const add = e.target.closest('[data-add]');
+  if (add) return openEditor(add.dataset.add, null);
   const line = e.target.closest('[data-line]');
   if (line) { const [date, i] = line.dataset.line.split('|'); return openEditor(date, Number(i)); }
   const other = e.target.closest('[data-select]');
@@ -890,6 +1098,26 @@ function accept(raw) {
     if (m.key) { searchKey = m.key; store.set('searchKey', searchKey); }
   }
   if (m.kind === 'catalog' && Array.isArray(m.rows)) { catalog = m.rows; store.set('catalog', JSON.stringify(catalog)); }
+  if (['projects', 'tickets', 'hint'].includes(m.kind) && Array.isArray(m.rows)) {
+    const key = `${m.kind}|${m.project ?? m.id ?? ''}|${m.at}`;
+    const p = (parts[key] ??= { of: m.of || 1, got: new Map() });
+    p.got.set(m.part || 0, m.rows);
+    if (p.got.size < p.of) return false;
+    delete parts[key];
+    const rows = [...p.got.keys()].sort((a, b) => a - b).flatMap((k) => p.got.get(k));
+    if (m.kind === 'projects' && (!store.get('projectsAt') || m.at >= store.get('projectsAt'))) {
+      projects = rows; store.set('projects', JSON.stringify(rows)); store.set('projectsAt', m.at);
+    }
+    if (m.kind === 'tickets' && m.project && !(ticketsByProject[m.project]?.at > m.at)) {
+      ticketsByProject[m.project] = { rows, at: m.at, fetched: Date.parse(m.at) || Date.now() };
+      const keep = Object.entries(ticketsByProject).sort((a, b) => b[1].fetched - a[1].fetched).slice(0, 8);
+      ticketsByProject = Object.fromEntries(keep);
+      store.set('tickets', JSON.stringify(ticketsByProject));
+    }
+    if (m.kind === 'hint' && m.id) hints[m.id] = rows;
+    editorHook?.();
+    return false;
+  }
   if (m.kind === 'day' && m.date) {
     const prev = days[m.date];
     // only a newer snapshot counts: replays of an older one would undo an unconfirmed edit
