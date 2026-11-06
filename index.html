@@ -260,7 +260,7 @@
   .picked .none { color: var(--red); }
   .chips { display: grid; gap: 6px; }
   .chip { text-align: left; border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 8px 11px; font-size: 14px; box-shadow: var(--shadow);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    line-height: 1.35; overflow-wrap: anywhere; }
   .chip small { display: block; color: var(--muted); font-size: 12px; }
   .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
   .chips .hint { margin: 2px 4px; }
@@ -268,7 +268,8 @@
   .bud { margin-left: auto; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--card-2); color: var(--muted); white-space: nowrap; }
   .bud.green { background: var(--green-soft); color: var(--green); } .bud.amber { background: var(--amber-soft); color: var(--amber); } .bud.red { background: var(--red-soft); color: var(--red); }
   .mine { font-size: 11px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; }
-  .ticket small { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .sheet .ticket small { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; margin-top: 1px; }
+  .picked-full { margin: -2px 4px 8px; font-size: 13.5px; color: var(--ink-2); line-height: 1.35; }
   .hint a { color: var(--accent); }
   .addline { display: block; width: 100%; margin-top: 8px; padding: 13px 16px; border: 1.5px dashed var(--line); border-radius: 16px; background: none;
     color: var(--accent); font-weight: 650; text-align: left; }
@@ -767,6 +768,7 @@ function openEditor(date, i) {
       <label for="proj">${T('Proyecto', 'Project')}</label>
       <select id="proj">${projectOptions()}</select>
       <label for="q">Ticket <span class="picked" id="picked"></span></label>
+      <div class="picked-full" id="pickedFull"></div>
       <div class="search"><input type="search" id="q" placeholder="${T('Filtrar por número o palabra', 'Filter by number or word')}" autocomplete="off" enterkeyhint="search"></div>
       <div class="tickets" id="tickets"></div>
       <label for="hrs">${T('Horas a reservar', 'Hours to book')}</label>
@@ -783,7 +785,7 @@ function openEditor(date, i) {
   </div>`;
   document.body.appendChild(bg);
   const $$ = (s) => bg.querySelector(s);
-  const q = $$('#q'), list = $$('#tickets'), proj = $$('#proj'), hintsEl = $$('#hints'), picked = $$('#picked');
+  const q = $$('#q'), list = $$('#tickets'), proj = $$('#proj'), hintsEl = $$('#hints'), picked = $$('#picked'), pickedFull = $$('#pickedFull');
   const hrs = $$('#hrs'), charge = $$('#charge'), skipLine = $$('#skipLine'), desc = $$('#desc');
   hrs.value = draft.hours ?? round2(duration(l));
   charge.checked = draft.chargeable;
@@ -837,10 +839,11 @@ function openEditor(date, i) {
       <span class="trow"><b>${esc(r[0])}</b>${r[4] ? `<span class="mine">${T('tuyo', 'yours')}</span>` : ''}${budgetTag(r, Number(hrs.value) || 0)}</span><small>${esc(r[1])}</small></button>`;
 
   function drawPicked() {
-    if (!draft.ticket) { picked.innerHTML = `<span class="none">${T('sin elegir', 'none chosen')}</span>`; return; }
+    if (!draft.ticket) { picked.innerHTML = `<span class="none">${T('sin elegir', 'none chosen')}</span>`; pickedFull.textContent = ''; return; }
     const pr = (ticketsByProject[projectIdOf(draft.project)]?.rows ?? []).find((r) => r[0] === draft.ticket);
     const c = catalog.find((r) => r[1] === draft.ticket);
-    picked.innerHTML = `· <b>${esc(draft.ticket)}</b> ${esc((pr?.[1] ?? c?.[2] ?? '').slice(0, 40))}`;
+    picked.innerHTML = `· <b>${esc(draft.ticket)}</b>`;
+    pickedFull.textContent = pr?.[1] ?? c?.[2] ?? '';
   }
 
   let shownProjects = projects.length;
@@ -1097,8 +1100,7 @@ function accept(raw) {
     copilot = m.url; store.set('copilot', copilot);
     if (m.key) { searchKey = m.key; store.set('searchKey', searchKey); }
   }
-  if (m.kind === 'catalog' && Array.isArray(m.rows)) { catalog = m.rows; store.set('catalog', JSON.stringify(catalog)); }
-  if (['projects', 'tickets', 'hint'].includes(m.kind) && Array.isArray(m.rows)) {
+  if (['catalog', 'projects', 'tickets', 'hint'].includes(m.kind) && Array.isArray(m.rows)) {
     const key = `${m.kind}|${m.project ?? m.id ?? ''}|${m.at}`;
     const p = (parts[key] ??= { of: m.of || 1, got: new Map() });
     p.got.set(m.part || 0, m.rows);
@@ -1115,6 +1117,9 @@ function accept(raw) {
       store.set('tickets', JSON.stringify(ticketsByProject));
     }
     if (m.kind === 'hint' && m.id) hints[m.id] = rows;
+    if (m.kind === 'catalog' && (!store.get('catalogAt') || m.at >= store.get('catalogAt'))) {
+      catalog = rows; store.set('catalog', JSON.stringify(rows)); store.set('catalogAt', m.at);
+    }
     editorHook?.();
     return false;
   }
