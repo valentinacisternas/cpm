@@ -376,6 +376,7 @@ let cpmDays = parse('cpmDays', {});           // date -> hours CPM already has (
 const waitSince = {};                         // date -> when the app started waiting for the VM
 const lastCmd = {};                           // date -> the last command sent for it (for Retry)
 const VM_PATIENCE = 30000;                    // after this the app says the VM isn't answering
+let outSeq = Number(store.get('outSeq')) || 0; // how far the VM's outbox has been read
 const pending = {};   // date -> 'approve' | 'skip' | 'reopen' sent, waiting for the VM
 const saving = {};    // dates with an edit the VM hasn't confirmed yet; Reservar waits for it
 const requested = {}; // date -> when the app asked the VM to draft/show it
@@ -443,6 +444,7 @@ async function send(cmd, label) {
   } catch {
     toast(T('No se pudo enviar. ¿Tienes internet?', "Couldn't send. Are you online?"));
   }
+  setTimeout(pullOutbox, 1500);
 }
 
 function pick(date, { force = false } = {}) {
@@ -1358,6 +1360,7 @@ function accept(raw) {
   if (m.kind === 'url' && m.url) {
     copilot = m.url; store.set('copilot', copilot);
     if (m.key) { searchKey = m.key; store.set('searchKey', searchKey); }
+    setTimeout(pullOutbox, 0);
   }
   if (m.kind === 'week' && Array.isArray(m.rows) && !(store.get('weekAt') > m.at)) {
     for (const k of Object.keys(cpmDays)) if (k >= m.from && k <= m.to) delete cpmDays[k];
@@ -1405,6 +1408,32 @@ function accept(raw) {
   return true;
 }
 
+/* The VM's answers come through the Copilot's tunnel (GET /approver/outbox), not ntfy:
+   ntfy.sh caps messages per day, and a busy day of edits once used them all up. ntfy
+   still carries the commands, the tunnel link and day status changes (the fallback). */
+let pulling = false;
+async function pullOutbox() {
+  if (!copilot || !searchKey || pulling) return;
+  pulling = true;
+  try {
+    const r = await fetch(`${copilot}/approver/outbox?after=${outSeq}`, { headers: { 'x-copilot-key': searchKey }, signal: AbortSignal.timeout(15000) });
+    if (r.ok) {
+      const body = await r.json();
+      if (body.last < outSeq) outSeq = 0;
+      let changed = false;
+      for (const m of body.messages ?? []) { changed = accept(JSON.stringify(m)) || changed; if (m.seq > outSeq) outSeq = m.seq; }
+      store.set('outSeq', String(outSeq));
+      if (changed) render();
+    }
+  } catch {} finally { pulling = false; }
+}
+// quick while the app waits for an answer (or the editor is open), slow otherwise
+(function outboxLoop() {
+  const busy = Object.keys(waitSince).length || Object.keys(requested).length || editorHook;
+  if (!document.hidden) pullOutbox();
+  setTimeout(outboxLoop, busy ? 2500 : 20000);
+})();
+
 let loading;
 async function load() {
   if (!cfg.d) return render();
@@ -1432,7 +1461,7 @@ function live() {
 
 render(); load(); live();
 if (cfg.r && Date.now() - (Date.parse(store.get('weekAt') || '') || 0) > 30 * 60e3) send('week');
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { load(); live(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { load(); live(); pullOutbox(); } });
 setInterval(setStatus, 30000);
 setInterval(() => { if (Object.keys(waitSince).length || Object.keys(requested).length) render(); }, 10000);
 </script>
